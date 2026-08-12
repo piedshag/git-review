@@ -10,6 +10,8 @@ go build -o git-review .
 OPENAI_API_KEY=... ./git-review --base main feature/my-change
 ```
 
+Flags may appear before or after the branch, so `./git-review feature/my-change -v` is valid too.
+
 Pass `-v` for a concise activity log on stderr. It shows when the model is thinking, which Git-backed tool it requested, whether it is reading the target or base snapshot, and per-step and total token usage. The final review remains on stdout, so it can still be redirected independently:
 
 ```sh
