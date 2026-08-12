@@ -10,11 +10,19 @@ go build -o git-review .
 OPENAI_API_KEY=... ./git-review --base main feature/my-change
 ```
 
-Pass `-v` to log each parsed model response, including tool calls and the final response, to stderr. The final review remains on stdout, so it can still be redirected independently:
+Pass `-v` for a concise activity log on stderr. It shows when the model is thinking, which Git-backed tool it requested, whether it is reading the target or base snapshot, and per-step and total token usage. The final review remains on stdout, so it can still be redirected independently:
 
 ```sh
 ./git-review -v --base main feature/my-change >review.txt
 ```
+
+When the endpoint includes `usage.cost`, the activity log reports it. Otherwise, pass the model's prices in US dollars per million tokens to estimate cost locally:
+
+```sh
+./git-review -v --input-price 0.50 --output-price 2.00 --base main feature/my-change
+```
+
+Use `--debug-model-output` when the complete parsed assistant responses are needed for troubleshooting.
 
 For a local or hosted OpenAI-compatible Chat Completions endpoint:
 

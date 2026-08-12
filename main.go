@@ -38,7 +38,10 @@ func run() error {
 	endpoint := fs.String("endpoint", env("OPENAI_BASE_URL", "https://api.openai.com/v1"), "OpenAI-compatible API base URL")
 	maxSteps := fs.Int("max-steps", envInt("GIT_REVIEW_MAX_STEPS", 20), "maximum model/tool turns")
 	timeout := fs.Duration("timeout", 10*time.Minute, "overall review timeout")
-	verbose := fs.Bool("v", false, "log model responses to stderr")
+	verbose := fs.Bool("v", false, "log review activity and token usage to stderr")
+	debugModelOutput := fs.Bool("debug-model-output", false, "log complete parsed model responses to stderr")
+	inputPrice := fs.Float64("input-price", 0, "input price in US dollars per million tokens")
+	outputPrice := fs.Float64("output-price", 0, "output price in US dollars per million tokens")
 	fs.Usage = func() { fmt.Fprint(fs.Output(), usage); fs.PrintDefaults() }
 	if err := fs.Parse(os.Args[1:]); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
@@ -53,18 +56,24 @@ func run() error {
 	if *maxSteps < 1 || *maxSteps > 100 {
 		return errors.New("max-steps must be between 1 and 100")
 	}
+	if *inputPrice < 0 || *outputPrice < 0 {
+		return errors.New("token prices cannot be negative")
+	}
 
 	snapshot, err := Open(*repoPath, *base, fs.Arg(0))
 	if err != nil {
 		return err
 	}
 	client, err := NewClient(Config{
-		Endpoint:  *endpoint,
-		APIKey:    os.Getenv("OPENAI_API_KEY"),
-		Model:     *model,
-		MaxSteps:  *maxSteps,
-		Verbose:   *verbose,
-		LogWriter: os.Stderr,
+		Endpoint:         *endpoint,
+		APIKey:           os.Getenv("OPENAI_API_KEY"),
+		Model:            *model,
+		MaxSteps:         *maxSteps,
+		Verbose:          *verbose,
+		DebugModelOutput: *debugModelOutput,
+		InputPrice:       *inputPrice,
+		OutputPrice:      *outputPrice,
+		LogWriter:        os.Stderr,
 	}, snapshot)
 	if err != nil {
 		return err

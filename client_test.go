@@ -37,13 +37,13 @@ func TestReviewExecutesToolCallAndReturnsReport(t *testing.T) {
 			if len(body.Tools) != 4 {
 				t.Errorf("got %d tools", len(body.Tools))
 			}
-			responseBody = `{"choices":[{"message":{"role":"assistant","tool_calls":[{"id":"call-1","type":"function","function":{"name":"stat","arguments":"{}"}}]}}]}`
+			responseBody = `{"choices":[{"message":{"role":"assistant","tool_calls":[{"id":"call-1","type":"function","function":{"name":"stat","arguments":"{}"}}]}}],"usage":{"prompt_tokens":100,"completion_tokens":10,"total_tokens":110,"cost":0.001}}`
 		} else {
 			last := body.Messages[len(body.Messages)-1]
 			if last.Role != "tool" || last.ToolCallID != "call-1" {
 				t.Errorf("tool result was not appended correctly: %+v", last)
 			}
-			responseBody = `{"choices":[{"message":{"role":"assistant","content":"No findings."}}]}`
+			responseBody = `{"choices":[{"message":{"role":"assistant","content":"No findings."}}],"usage":{"prompt_tokens":200,"completion_tokens":20,"total_tokens":220,"cost":0.002}}`
 		}
 		return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(responseBody))}, nil
 	})
@@ -61,10 +61,19 @@ func TestReviewExecutesToolCallAndReturnsReport(t *testing.T) {
 		t.Fatalf("report=%q calls=%d", report, calls.Load())
 	}
 	logOutput := logs.String()
-	for _, expected := range []string{"model response step=1", `"name":"stat"`, "model response step=2", "No findings."} {
+	for _, expected := range []string{
+		"thinking (step 1)",
+		"tool: inspecting changed-file statistics",
+		"usage step=1: 100 input + 10 output = 110 tokens, cost $0.001000",
+		"thinking (step 2)",
+		"review complete: 300 input + 30 output = 330 tokens, total cost $0.003000",
+	} {
 		if !strings.Contains(logOutput, expected) {
 			t.Errorf("verbose log does not contain %q:\n%s", expected, logOutput)
 		}
+	}
+	if strings.Contains(logOutput, `"role":"assistant"`) {
+		t.Errorf("verbose log unexpectedly contains raw model output:\n%s", logOutput)
 	}
 }
 
@@ -75,6 +84,44 @@ func TestReviewDoesNotLogByDefault(t *testing.T) {
 	}
 	if client.logger != nil {
 		t.Fatal("logger is enabled without Verbose")
+	}
+}
+
+func TestToolActivityIncludesArgumentsAndRef(t *testing.T) {
+	var logs bytes.Buffer
+	client, err := NewClient(Config{Endpoint: "http://model.test/v1", Model: "test-model", Verbose: true, LogWriter: &logs}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	client.logToolCall(toolCall{Function: functionCall{Name: "grep", Arguments: `{"pattern":"TODO","glob":"**/*.go","ref":"base"}`}})
+	client.logToolCall(toolCall{Function: functionCall{Name: "read", Arguments: `{"path":"main.go","ref":"base","start":10,"end":20}`}})
+	for _, expected := range []string{
+		`tool: grepping base files matching "**/*.go" for "TODO"`,
+		`tool: reading "main.go" from base (lines 10-20)`,
+	} {
+		if !strings.Contains(logs.String(), expected) {
+			t.Errorf("activity log does not contain %q:\n%s", expected, logs.String())
+		}
+	}
+}
+
+func TestUsageCostFallsBackToConfiguredPrices(t *testing.T) {
+	client := &Client{inputPrice: 0.50, outputPrice: 2.00}
+	cost, available, estimated := client.usageCost(tokenUsage{PromptTokens: 1_000_000, CompletionTokens: 500_000})
+	if !available || !estimated || cost != 1.50 {
+		t.Fatalf("cost=%f available=%t estimated=%t", cost, available, estimated)
+	}
+}
+
+func TestDebugModelOutputIsSeparateFromVerboseActivity(t *testing.T) {
+	var logs bytes.Buffer
+	client, err := NewClient(Config{Endpoint: "http://model.test/v1", Model: "test-model", DebugModelOutput: true, LogWriter: &logs}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	client.logModelResponse(1, message{Role: "assistant", Content: "details"})
+	if !strings.Contains(logs.String(), `"content":"details"`) {
+		t.Fatalf("debug log did not contain model output: %s", logs.String())
 	}
 }
 
