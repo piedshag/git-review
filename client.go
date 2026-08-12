@@ -16,6 +16,8 @@ import (
 	"time"
 )
 
+var errOutputLimit = errors.New("model response was truncated because it reached a provider output limit")
+
 type Config struct {
 	Endpoint         string
 	APIKey           string
@@ -32,7 +34,6 @@ type Config struct {
 	MaxResponseBytes int
 	ExcludeReasoning bool
 	ReasoningEffort  string
-	MaxOutputTokens  int
 }
 
 type Client struct {
@@ -52,7 +53,6 @@ type Client struct {
 	maxResponseBytes int
 	excludeReasoning bool
 	reasoningEffort  string
-	maxOutputTokens  int
 }
 
 type message struct {
@@ -76,14 +76,13 @@ type functionCall struct {
 }
 
 type request struct {
-	Model               string            `json:"model"`
-	Messages            []message         `json:"messages"`
-	Tools               []Tool            `json:"tools"`
-	Stream              bool              `json:"stream,omitempty"`
-	StreamOptions       *streamOptions    `json:"stream_options,omitempty"`
-	Reasoning           *reasoningOptions `json:"reasoning,omitempty"`
-	ReasoningEffort     string            `json:"reasoning_effort,omitempty"`
-	MaxCompletionTokens int               `json:"max_completion_tokens,omitempty"`
+	Model           string            `json:"model"`
+	Messages        []message         `json:"messages"`
+	Tools           []Tool            `json:"tools"`
+	Stream          bool              `json:"stream,omitempty"`
+	StreamOptions   *streamOptions    `json:"stream_options,omitempty"`
+	Reasoning       *reasoningOptions `json:"reasoning,omitempty"`
+	ReasoningEffort string            `json:"reasoning_effort,omitempty"`
 }
 
 type streamOptions struct {
@@ -188,7 +187,6 @@ func NewClient(config Config, repo *Snapshot) (*Client, error) {
 		maxResponseBytes: maxResponseBytes,
 		excludeReasoning: config.ExcludeReasoning,
 		reasoningEffort:  config.ReasoningEffort,
-		maxOutputTokens:  config.MaxOutputTokens,
 	}
 	if config.Verbose || config.DebugModelOutput {
 		writer := config.LogWriter
@@ -226,6 +224,25 @@ func (c *Client) Review(ctx context.Context) (string, error) {
 		c.activity("thinking (step %d)...", step+1)
 		assistant, turnUsage, err := c.complete(ctx, messages)
 		if err != nil {
+			if errors.Is(err, errOutputLimit) {
+				if turnUsage.reported() {
+					usageSeen = true
+					total.add(turnUsage)
+					cost, available, estimated := c.usageCost(turnUsage)
+					if available {
+						totalCost += cost
+						costEstimated = costEstimated || estimated
+					} else {
+						costComplete = false
+					}
+					c.logUsage("step", step+1, turnUsage, cost, available, estimated)
+				} else {
+					usageComplete = false
+					costComplete = false
+				}
+				c.logInconclusive(total, totalCost, costComplete, costEstimated, usageComplete, usageSeen)
+				return c.inconclusiveReview(), nil
+			}
 			return "", err
 		}
 		c.logModelResponse(step+1, assistant)
@@ -267,6 +284,10 @@ func (c *Client) Review(ctx context.Context) (string, error) {
 		}
 	}
 	return "", fmt.Errorf("model exceeded the %d-step tool limit", c.maxSteps)
+}
+
+func (c *Client) inconclusiveReview() string {
+	return "Review inconclusive: the model response was truncated by a provider output limit before the review completed. No clean-review conclusion can be drawn. Consider lowering --reasoning-effort or selecting a model with a larger output allowance."
 }
 
 func (c *Client) logModelResponse(step int, assistant message) {
@@ -397,6 +418,32 @@ func (c *Client) logTotal(value tokenUsage, cost float64, costAvailable, costEst
 	}
 }
 
+func (c *Client) logInconclusive(value tokenUsage, cost float64, costAvailable, costEstimated, usageComplete, usageSeen bool) {
+	message := "review inconclusive: model response reached a provider output limit"
+	if usageSeen {
+		usageLabel := ""
+		if !usageComplete {
+			usageLabel = "reported "
+		}
+		message += fmt.Sprintf("; %s%d input + %d output = %d tokens", usageLabel, value.PromptTokens, value.CompletionTokens, value.TotalTokens)
+		if costAvailable {
+			costLabel := "cost"
+			if costEstimated {
+				costLabel = "estimated cost"
+			}
+			message += fmt.Sprintf(", %s $%.6f", costLabel, cost)
+		} else {
+			message += ", cost unavailable"
+		}
+	}
+	if c.logger != nil && c.verbose {
+		c.logger.Print(message)
+	} else if c.progress != nil {
+		c.progress.Next("%s", message)
+		c.progress.Finish()
+	}
+}
+
 func (c *Client) streamActivity(stats streamStats, started time.Time) {
 	if c.progress != nil {
 		c.progress.Update("Receiving streamed response: %s", stats.summary())
@@ -447,7 +494,6 @@ func byteCount(size int) string {
 func (c *Client) complete(ctx context.Context, messages []message) (message, tokenUsage, error) {
 	requestBody := request{Model: c.model, Messages: messages, Tools: c.repo.Tools(), Stream: c.stream}
 	requestBody.ReasoningEffort = c.reasoningEffort
-	requestBody.MaxCompletionTokens = c.maxOutputTokens
 	if c.excludeReasoning {
 		requestBody.Reasoning = &reasoningOptions{Exclude: true}
 	}
@@ -499,7 +545,7 @@ func decodeCompletion(reader io.Reader, statusCode, limit int) (message, tokenUs
 		return message{}, tokenUsage{}, errors.New("model API returned no choices")
 	}
 	if decoded.Choices[0].FinishReason == "length" {
-		return message{}, tokenUsage{}, errors.New("model exhausted its output-token limit before completing the turn; increase --max-output-tokens or lower --reasoning-effort")
+		return decoded.Choices[0].Message, decoded.Usage, errOutputLimit
 	}
 	return decoded.Choices[0].Message, decoded.Usage, nil
 }
@@ -639,7 +685,7 @@ streamLoop:
 		return message{}, tokenUsage{}, fmt.Errorf("read streamed model response: %w", err)
 	}
 	if finishReason == "length" {
-		return message{}, tokenUsage{}, fmt.Errorf("model exhausted the %d-token output limit before completing the turn; increase --max-output-tokens or lower --reasoning-effort", c.maxOutputTokens)
+		return assembled, streamUsage, errOutputLimit
 	}
 	if !done && len(dataLines) > 0 {
 		if _, err := processEvent(); err != nil {

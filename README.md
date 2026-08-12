@@ -30,11 +30,13 @@ For streamed responses, `-v` reports progress every 100 SSE chunks with raw, vis
 
 If reasoning text itself is not useful, `--exclude-reasoning` asks compatible endpoints such as OpenRouter to omit it from the response. The model still reasons and bills reasoning tokens, but substantially less SSE data may be transferred.
 
-To keep individual tool-selection turns responsive, the CLI defaults to `--reasoning-effort low` and `--max-output-tokens 4096`. Increase either for unusually difficult reviews, or use `--reasoning-effort=` and `--max-output-tokens=0` to leave both decisions to the provider:
+The CLI defaults to `--reasoning-effort medium`. It does not set a completion-token limit; the selected model and provider choose their natural output allowance. Use an empty value to leave reasoning effort to the provider as well:
 
 ```sh
-./git-review feature/my-change --reasoning-effort medium --max-output-tokens 8192
+./git-review feature/my-change --reasoning-effort high
 ```
+
+If a provider still truncates a response at its own limit, the command does not retry or fail the process. It prints an explicitly inconclusive review and exits successfully so CI infrastructure remains healthy without falsely reporting a clean review. Token usage and cost from the truncated attempt are retained when the provider reports them.
 
 Responses are streamed by default. This keeps long model turns active and lets `-v` report when OpenRouter is still processing or response chunks have started arriving. The configurable overall `--timeout` governs the entire review; there is no shorter per-request deadline. Use `--stream=false` for an endpoint that does not support Chat Completions streaming.
 

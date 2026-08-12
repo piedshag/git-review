@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"os"
@@ -207,19 +208,26 @@ func TestExcludeReasoningIsSentWhenConfigured(t *testing.T) {
 	}
 }
 
-func TestGenerationControlsAreSent(t *testing.T) {
+func TestReasoningEffortIsSentWithoutOutputLimit(t *testing.T) {
 	transport := roundTripFunc(func(r *http.Request) (*http.Response, error) {
 		var body request
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 			t.Fatal(err)
 		}
-		if body.ReasoningEffort != "low" || body.MaxCompletionTokens != 4096 {
-			t.Fatalf("generation controls were not sent: effort=%q max=%d", body.ReasoningEffort, body.MaxCompletionTokens)
+		if body.ReasoningEffort != "medium" {
+			t.Fatalf("reasoning effort was not sent: %q", body.ReasoningEffort)
+		}
+		encoded, err := json.Marshal(body)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if strings.Contains(string(encoded), "max_completion_tokens") {
+			t.Fatalf("request unexpectedly contains an output-token limit: %s", encoded)
 		}
 		responseBody := `{"choices":[{"message":{"role":"assistant","content":"done"}}]}`
 		return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(responseBody))}, nil
 	})
-	client, err := NewClient(Config{Endpoint: "http://model.test/v1", Model: "test-model", ReasoningEffort: "low", MaxOutputTokens: 4096}, makeSnapshot(t))
+	client, err := NewClient(Config{Endpoint: "http://model.test/v1", Model: "test-model", ReasoningEffort: "medium"}, makeSnapshot(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -229,15 +237,47 @@ func TestGenerationControlsAreSent(t *testing.T) {
 	}
 }
 
-func TestStreamingCompletionReportsOutputLimit(t *testing.T) {
-	client, err := NewClient(Config{Endpoint: "http://model.test/v1", Model: "test-model", MaxOutputTokens: 4096}, nil)
+func TestStreamingCompletionReportsProviderOutputLimit(t *testing.T) {
+	client, err := NewClient(Config{Endpoint: "http://model.test/v1", Model: "test-model"}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 	stream := "data: {\"choices\":[{\"delta\":{\"reasoning\":\"still thinking\"},\"finish_reason\":\"length\"}]}\n\ndata: [DONE]\n\n"
 	_, _, err = client.decodeStream(strings.NewReader(stream))
-	if err == nil || !strings.Contains(err.Error(), "exhausted the 4096-token output limit") {
+	if !errors.Is(err, errOutputLimit) {
 		t.Fatalf("expected actionable output limit error, got %v", err)
+	}
+}
+
+func TestReviewReturnsInconclusiveWithoutErrorWhenProviderTruncates(t *testing.T) {
+	var logs bytes.Buffer
+	transport := roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		stream := strings.Join([]string{
+			`data: {"choices":[{"delta":{"reasoning":"still reviewing"},"finish_reason":"length"}]}`,
+			``,
+			`data: {"choices":[],"usage":{"prompt_tokens":100,"completion_tokens":50,"total_tokens":150,"cost":0.001}}`,
+			``,
+			`data: [DONE]`,
+			``,
+		}, "\n")
+		return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(stream))}, nil
+	})
+	client, err := NewClient(Config{Endpoint: "http://model.test/v1", Model: "test-model", MaxSteps: 3, Stream: true, Verbose: true, LogWriter: &logs}, makeSnapshot(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	client.http = &http.Client{Transport: transport}
+	review, err := client.Review(t.Context())
+	if err != nil {
+		t.Fatalf("truncated review should not fail CI: %v", err)
+	}
+	if !strings.Contains(review, "Review inconclusive") || strings.Contains(review, "No findings") {
+		t.Fatalf("unexpected truncated review: %q", review)
+	}
+	for _, expected := range []string{"review inconclusive", "150 tokens", "cost $0.001000"} {
+		if !strings.Contains(logs.String(), expected) {
+			t.Errorf("truncation log does not contain %q:\n%s", expected, logs.String())
+		}
 	}
 }
 

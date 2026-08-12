@@ -45,8 +45,7 @@ func run() error {
 	stream := fs.Bool("stream", true, "stream Chat Completions responses")
 	maxResponseMiB := fs.Int("max-response-mib", 64, "maximum model response size per turn in MiB")
 	excludeReasoning := fs.Bool("exclude-reasoning", false, "ask compatible endpoints not to return reasoning text")
-	reasoningEffort := fs.String("reasoning-effort", "low", "reasoning effort: none, minimal, low, medium, high, xhigh, max, or empty")
-	maxOutputTokens := fs.Int("max-output-tokens", 4096, "maximum output tokens per model turn; 0 lets the provider decide")
+	reasoningEffort := fs.String("reasoning-effort", "medium", "reasoning effort: none, minimal, low, medium, high, xhigh, max, or empty")
 	fs.Usage = func() { fmt.Fprint(fs.Output(), usage); fs.PrintDefaults() }
 	if err := parseInterspersed(fs, os.Args[1:]); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
@@ -70,9 +69,6 @@ func run() error {
 	if !validReasoningEffort(*reasoningEffort) {
 		return errors.New("reasoning-effort must be none, minimal, low, medium, high, xhigh, max, or empty")
 	}
-	if *maxOutputTokens < 0 {
-		return errors.New("max-output-tokens cannot be negative")
-	}
 
 	snapshot, err := Open(*repoPath, *base, fs.Arg(0))
 	if err != nil {
@@ -91,7 +87,6 @@ func run() error {
 		MaxResponseBytes: *maxResponseMiB * 1024 * 1024,
 		ExcludeReasoning: *excludeReasoning,
 		ReasoningEffort:  *reasoningEffort,
-		MaxOutputTokens:  *maxOutputTokens,
 		LogWriter:        os.Stderr,
 		Progress:         terminalOutput(os.Stderr),
 		ProgressWriter:   os.Stderr,
