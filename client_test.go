@@ -172,6 +172,26 @@ func TestStreamingCompletionAssemblesToolCallsAndUsage(t *testing.T) {
 	}
 }
 
+func TestStreamingCompletionHonorsConfiguredResponseLimit(t *testing.T) {
+	client, err := NewClient(Config{Endpoint: "http://model.test/v1", Model: "test-model", MaxResponseBytes: 100}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	events := strings.Repeat("data: {\"choices\":[]}\n\n", 8) + "data: [DONE]\n\n"
+	_, _, err = client.decodeStream(strings.NewReader(events))
+	if err == nil || !strings.Contains(err.Error(), "exceeded 100 B limit") {
+		t.Fatalf("expected configured stream limit error, got %v", err)
+	}
+}
+
+func TestNonStreamingCompletionHonorsConfiguredResponseLimit(t *testing.T) {
+	body := `{"choices":[{"message":{"role":"assistant","content":"a response larger than the configured limit"}}]}`
+	_, _, err := decodeCompletion(strings.NewReader(body), http.StatusOK, 20)
+	if err == nil || !strings.Contains(err.Error(), "exceeded 20 B limit") {
+		t.Fatalf("expected configured response limit error, got %v", err)
+	}
+}
+
 type roundTripFunc func(*http.Request) (*http.Response, error)
 
 func (fn roundTripFunc) RoundTrip(request *http.Request) (*http.Response, error) {

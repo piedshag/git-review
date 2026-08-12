@@ -43,6 +43,7 @@ func run() error {
 	inputPrice := fs.Float64("input-price", 0, "input price in US dollars per million tokens")
 	outputPrice := fs.Float64("output-price", 0, "output price in US dollars per million tokens")
 	stream := fs.Bool("stream", true, "stream Chat Completions responses")
+	maxResponseMiB := fs.Int("max-response-mib", 64, "maximum model response size per turn in MiB")
 	fs.Usage = func() { fmt.Fprint(fs.Output(), usage); fs.PrintDefaults() }
 	if err := fs.Parse(os.Args[1:]); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
@@ -60,6 +61,9 @@ func run() error {
 	if *inputPrice < 0 || *outputPrice < 0 {
 		return errors.New("token prices cannot be negative")
 	}
+	if *maxResponseMiB < 1 || *maxResponseMiB > 1024 {
+		return errors.New("max-response-mib must be between 1 and 1024")
+	}
 
 	snapshot, err := Open(*repoPath, *base, fs.Arg(0))
 	if err != nil {
@@ -75,6 +79,7 @@ func run() error {
 		InputPrice:       *inputPrice,
 		OutputPrice:      *outputPrice,
 		Stream:           *stream,
+		MaxResponseBytes: *maxResponseMiB * 1024 * 1024,
 		LogWriter:        os.Stderr,
 		Progress:         terminalOutput(os.Stderr),
 		ProgressWriter:   os.Stderr,

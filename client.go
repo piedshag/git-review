@@ -29,22 +29,24 @@ type Config struct {
 	LogWriter        io.Writer
 	Progress         bool
 	ProgressWriter   io.Writer
+	MaxResponseBytes int
 }
 
 type Client struct {
-	endpoint    string
-	apiKey      string
-	model       string
-	maxSteps    int
-	http        *http.Client
-	repo        *Snapshot
-	logger      *log.Logger
-	verbose     bool
-	debug       bool
-	inputPrice  float64
-	outputPrice float64
-	stream      bool
-	progress    *spinner
+	endpoint         string
+	apiKey           string
+	model            string
+	maxSteps         int
+	http             *http.Client
+	repo             *Snapshot
+	logger           *log.Logger
+	verbose          bool
+	debug            bool
+	inputPrice       float64
+	outputPrice      float64
+	stream           bool
+	progress         *spinner
+	maxResponseBytes int
 }
 
 type message struct {
@@ -131,12 +133,20 @@ func NewClient(config Config, repo *Snapshot) (*Client, error) {
 	if !strings.HasSuffix(endpoint, "/chat/completions") {
 		endpoint += "/chat/completions"
 	}
+	maxResponseBytes := config.MaxResponseBytes
+	if maxResponseBytes == 0 {
+		maxResponseBytes = 64 * 1024 * 1024
+	}
+	if maxResponseBytes < 1 {
+		return nil, errors.New("maximum response size must be positive")
+	}
 	client := &Client{
 		endpoint: endpoint, apiKey: config.APIKey, model: config.Model,
 		maxSteps: config.MaxSteps, http: &http.Client{}, repo: repo,
 		verbose: config.Verbose, debug: config.DebugModelOutput,
 		inputPrice: config.InputPrice, outputPrice: config.OutputPrice,
-		stream: config.Stream,
+		stream:           config.Stream,
+		maxResponseBytes: maxResponseBytes,
 	}
 	if config.Verbose || config.DebugModelOutput {
 		writer := config.LogWriter
@@ -359,6 +369,9 @@ func byteCount(size int) string {
 	if size < 1024 {
 		return fmt.Sprintf("%d B", size)
 	}
+	if size >= 1024*1024 {
+		return fmt.Sprintf("%.1f MiB", float64(size)/(1024*1024))
+	}
 	return fmt.Sprintf("%.1f KiB", float64(size)/1024)
 }
 
@@ -390,13 +403,16 @@ func (c *Client) complete(ctx context.Context, messages []message) (message, tok
 	if c.stream {
 		return c.decodeStream(resp.Body)
 	}
-	return decodeCompletion(resp.Body, resp.StatusCode)
+	return decodeCompletion(resp.Body, resp.StatusCode, c.maxResponseBytes)
 }
 
-func decodeCompletion(reader io.Reader, statusCode int) (message, tokenUsage, error) {
-	body, err := io.ReadAll(io.LimitReader(reader, 4*1024*1024))
+func decodeCompletion(reader io.Reader, statusCode, limit int) (message, tokenUsage, error) {
+	body, err := io.ReadAll(io.LimitReader(reader, int64(limit)+1))
 	if err != nil {
 		return message{}, tokenUsage{}, err
+	}
+	if len(body) > limit {
+		return message{}, tokenUsage{}, fmt.Errorf("model response exceeded %s limit", byteCount(limit))
 	}
 	var decoded response
 	if err := json.Unmarshal(body, &decoded); err != nil {
@@ -428,7 +444,7 @@ func decodeAPIError(resp *http.Response) error {
 
 func (c *Client) decodeStream(reader io.Reader) (message, tokenUsage, error) {
 	scanner := bufio.NewScanner(reader)
-	scanner.Buffer(make([]byte, 64*1024), 1024*1024)
+	scanner.Buffer(make([]byte, 64*1024), c.maxResponseBytes)
 	assembled := message{Role: "assistant"}
 	toolCalls := make(map[int]*toolCall)
 	var streamUsage tokenUsage
@@ -450,8 +466,8 @@ func (c *Client) decodeStream(reader io.Reader) (message, tokenUsage, error) {
 		}
 		totalBytes += len(data)
 		chunks++
-		if totalBytes > 4*1024*1024 {
-			return false, errors.New("streamed model response exceeded 4 MiB")
+		if totalBytes > c.maxResponseBytes {
+			return false, fmt.Errorf("streamed model response exceeded %s limit; increase --max-response-mib if this is expected", byteCount(c.maxResponseBytes))
 		}
 		var chunk streamChunk
 		if err := json.Unmarshal([]byte(data), &chunk); err != nil {
