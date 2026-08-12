@@ -44,6 +44,7 @@ func run() error {
 	outputPrice := fs.Float64("output-price", 0, "output price in US dollars per million tokens")
 	stream := fs.Bool("stream", true, "stream Chat Completions responses")
 	maxResponseMiB := fs.Int("max-response-mib", 64, "maximum model response size per turn in MiB")
+	excludeReasoning := fs.Bool("exclude-reasoning", false, "ask compatible endpoints not to return reasoning text")
 	fs.Usage = func() { fmt.Fprint(fs.Output(), usage); fs.PrintDefaults() }
 	if err := fs.Parse(os.Args[1:]); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
@@ -80,6 +81,7 @@ func run() error {
 		OutputPrice:      *outputPrice,
 		Stream:           *stream,
 		MaxResponseBytes: *maxResponseMiB * 1024 * 1024,
+		ExcludeReasoning: *excludeReasoning,
 		LogWriter:        os.Stderr,
 		Progress:         terminalOutput(os.Stderr),
 		ProgressWriter:   os.Stderr,

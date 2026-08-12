@@ -30,6 +30,7 @@ type Config struct {
 	Progress         bool
 	ProgressWriter   io.Writer
 	MaxResponseBytes int
+	ExcludeReasoning bool
 }
 
 type Client struct {
@@ -47,13 +48,16 @@ type Client struct {
 	stream           bool
 	progress         *spinner
 	maxResponseBytes int
+	excludeReasoning bool
 }
 
 type message struct {
-	Role       string     `json:"role"`
-	Content    string     `json:"content,omitempty"`
-	ToolCalls  []toolCall `json:"tool_calls,omitempty"`
-	ToolCallID string     `json:"tool_call_id,omitempty"`
+	Role             string            `json:"role"`
+	Content          string            `json:"content,omitempty"`
+	Reasoning        string            `json:"reasoning,omitempty"`
+	ReasoningDetails []reasoningDetail `json:"reasoning_details,omitempty"`
+	ToolCalls        []toolCall        `json:"tool_calls,omitempty"`
+	ToolCallID       string            `json:"tool_call_id,omitempty"`
 }
 
 type toolCall struct {
@@ -68,15 +72,20 @@ type functionCall struct {
 }
 
 type request struct {
-	Model         string         `json:"model"`
-	Messages      []message      `json:"messages"`
-	Tools         []Tool         `json:"tools"`
-	Stream        bool           `json:"stream,omitempty"`
-	StreamOptions *streamOptions `json:"stream_options,omitempty"`
+	Model         string            `json:"model"`
+	Messages      []message         `json:"messages"`
+	Tools         []Tool            `json:"tools"`
+	Stream        bool              `json:"stream,omitempty"`
+	StreamOptions *streamOptions    `json:"stream_options,omitempty"`
+	Reasoning     *reasoningOptions `json:"reasoning,omitempty"`
 }
 
 type streamOptions struct {
 	IncludeUsage bool `json:"include_usage"`
+}
+
+type reasoningOptions struct {
+	Exclude bool `json:"exclude"`
 }
 
 type response struct {
@@ -102,9 +111,22 @@ type streamChunk struct {
 }
 
 type messageDelta struct {
-	Role      string          `json:"role"`
-	Content   string          `json:"content"`
-	ToolCalls []toolCallDelta `json:"tool_calls"`
+	Role             string            `json:"role"`
+	Content          string            `json:"content"`
+	Reasoning        string            `json:"reasoning"`
+	ReasoningDetails []reasoningDetail `json:"reasoning_details"`
+	ToolCalls        []toolCallDelta   `json:"tool_calls"`
+}
+
+type reasoningDetail struct {
+	Type      string          `json:"type"`
+	Text      string          `json:"text,omitempty"`
+	Summary   string          `json:"summary,omitempty"`
+	Data      string          `json:"data,omitempty"`
+	Signature json.RawMessage `json:"signature,omitempty"`
+	ID        json.RawMessage `json:"id,omitempty"`
+	Format    json.RawMessage `json:"format,omitempty"`
+	Index     json.RawMessage `json:"index,omitempty"`
 }
 
 type toolCallDelta struct {
@@ -119,6 +141,16 @@ type tokenUsage struct {
 	CompletionTokens int      `json:"completion_tokens"`
 	TotalTokens      int      `json:"total_tokens"`
 	Cost             *float64 `json:"cost,omitempty"`
+}
+
+type streamStats struct {
+	Chunks         int
+	RawBytes       int
+	ContentBytes   int
+	ReasoningBytes int
+	ToolBytes      int
+	LatestKind     string
+	Latest         string
 }
 
 func NewClient(config Config, repo *Snapshot) (*Client, error) {
@@ -147,6 +179,7 @@ func NewClient(config Config, repo *Snapshot) (*Client, error) {
 		inputPrice: config.InputPrice, outputPrice: config.OutputPrice,
 		stream:           config.Stream,
 		maxResponseBytes: maxResponseBytes,
+		excludeReasoning: config.ExcludeReasoning,
 	}
 	if config.Verbose || config.DebugModelOutput {
 		writer := config.LogWriter
@@ -355,14 +388,41 @@ func (c *Client) logTotal(value tokenUsage, cost float64, costAvailable, costEst
 	}
 }
 
-func (c *Client) streamActivity(chunks, bytes int, started time.Time) {
+func (c *Client) streamActivity(stats streamStats, started time.Time) {
 	if c.progress != nil {
-		c.progress.Update("Receiving streamed response: %d chunks, %s", chunks, byteCount(bytes))
+		c.progress.Update("Receiving streamed response: %s", stats.summary())
 		return
 	}
-	if c.logger != nil && c.verbose && chunks%100 == 0 {
-		c.logger.Printf("stream: received %d chunks, %s in %s", chunks, byteCount(bytes), elapsed(started))
+	if c.logger != nil && c.verbose && (stats.Chunks == 1 || stats.Chunks%100 == 0) {
+		message := fmt.Sprintf("stream: received %s in %s", stats.summary(), elapsed(started))
+		if stats.Latest != "" {
+			message += fmt.Sprintf(", latest %s=%q", stats.LatestKind, preview(stats.Latest, 120))
+		}
+		c.logger.Print(message)
 	}
+}
+
+func (s streamStats) summary() string {
+	parts := []string{fmt.Sprintf("%d chunks / %s raw", s.Chunks, byteCount(s.RawBytes))}
+	if s.ReasoningBytes > 0 {
+		parts = append(parts, "reasoning "+byteCount(s.ReasoningBytes))
+	}
+	if s.ContentBytes > 0 {
+		parts = append(parts, "content "+byteCount(s.ContentBytes))
+	}
+	if s.ToolBytes > 0 {
+		parts = append(parts, "tools "+byteCount(s.ToolBytes))
+	}
+	return strings.Join(parts, ", ")
+}
+
+func preview(value string, limit int) string {
+	value = strings.Join(strings.Fields(value), " ")
+	runes := []rune(value)
+	if len(runes) <= limit {
+		return value
+	}
+	return string(runes[:limit]) + "…"
 }
 
 func byteCount(size int) string {
@@ -377,6 +437,9 @@ func byteCount(size int) string {
 
 func (c *Client) complete(ctx context.Context, messages []message) (message, tokenUsage, error) {
 	requestBody := request{Model: c.model, Messages: messages, Tools: c.repo.Tools(), Stream: c.stream}
+	if c.excludeReasoning {
+		requestBody.Reasoning = &reasoningOptions{Exclude: true}
+	}
 	if c.stream {
 		requestBody.StreamOptions = &streamOptions{IncludeUsage: true}
 	}
@@ -449,8 +512,7 @@ func (c *Client) decodeStream(reader io.Reader) (message, tokenUsage, error) {
 	toolCalls := make(map[int]*toolCall)
 	var streamUsage tokenUsage
 	var dataLines []string
-	totalBytes := 0
-	chunks := 0
+	var stats streamStats
 	streamStarted := time.Now()
 	receivingLogged := false
 	processingLogged := false
@@ -464,9 +526,9 @@ func (c *Client) decodeStream(reader io.Reader) (message, tokenUsage, error) {
 		if data == "[DONE]" {
 			return true, nil
 		}
-		totalBytes += len(data)
-		chunks++
-		if totalBytes > c.maxResponseBytes {
+		stats.RawBytes += len(data)
+		stats.Chunks++
+		if stats.RawBytes > c.maxResponseBytes {
 			return false, fmt.Errorf("streamed model response exceeded %s limit; increase --max-response-mib if this is expected", byteCount(c.maxResponseBytes))
 		}
 		var chunk streamChunk
@@ -488,6 +550,23 @@ func (c *Client) decodeStream(reader io.Reader) (message, tokenUsage, error) {
 				assembled.Role = delta.Role
 			}
 			assembled.Content += delta.Content
+			assembled.Reasoning += delta.Reasoning
+			if delta.Content != "" {
+				stats.ContentBytes += len(delta.Content)
+				stats.LatestKind, stats.Latest = "content", delta.Content
+			}
+			if delta.Reasoning != "" {
+				stats.ReasoningBytes += len(delta.Reasoning)
+				stats.LatestKind, stats.Latest = "reasoning", delta.Reasoning
+			}
+			for _, detail := range delta.ReasoningDetails {
+				assembled.ReasoningDetails = mergeReasoningDetail(assembled.ReasoningDetails, detail)
+				text := detail.Text + detail.Summary + detail.Data
+				stats.ReasoningBytes += len(text)
+				if text != "" {
+					stats.LatestKind, stats.Latest = "reasoning", text
+				}
+			}
 			for _, fragment := range delta.ToolCalls {
 				call := toolCalls[fragment.Index]
 				if call == nil {
@@ -498,6 +577,11 @@ func (c *Client) decodeStream(reader io.Reader) (message, tokenUsage, error) {
 				call.Type += fragment.Type
 				call.Function.Name += fragment.Function.Name
 				call.Function.Arguments += fragment.Function.Arguments
+				toolText := fragment.Function.Name + fragment.Function.Arguments
+				stats.ToolBytes += len(fragment.ID) + len(fragment.Type) + len(toolText)
+				if toolText != "" {
+					stats.LatestKind, stats.Latest = "tool", toolText
+				}
 			}
 		}
 		if !receivingLogged && len(chunk.Choices) > 0 {
@@ -505,7 +589,7 @@ func (c *Client) decodeStream(reader io.Reader) (message, tokenUsage, error) {
 			receivingLogged = true
 		}
 		if receivingLogged {
-			c.streamActivity(chunks, totalBytes, streamStarted)
+			c.streamActivity(stats, streamStarted)
 		}
 		return false, nil
 	}
@@ -553,4 +637,35 @@ streamLoop:
 		return message{}, tokenUsage{}, errors.New("model stream returned neither content nor tool calls")
 	}
 	return assembled, streamUsage, nil
+}
+
+func mergeReasoningDetail(details []reasoningDetail, fragment reasoningDetail) []reasoningDetail {
+	for i := len(details) - 1; i >= 0; i-- {
+		current := &details[i]
+		if (len(current.Index) > 0 && len(fragment.Index) > 0 && !bytes.Equal(current.Index, fragment.Index)) ||
+			(current.Type != "" && fragment.Type != "" && current.Type != fragment.Type) ||
+			(len(current.ID) > 0 && len(fragment.ID) > 0 && !bytes.Equal(current.ID, fragment.ID)) {
+			continue
+		}
+		current.Text += fragment.Text
+		current.Summary += fragment.Summary
+		current.Data += fragment.Data
+		if len(fragment.Signature) > 0 {
+			current.Signature = fragment.Signature
+		}
+		if len(current.ID) == 0 {
+			current.ID = fragment.ID
+		}
+		if current.Type == "" {
+			current.Type = fragment.Type
+		}
+		if len(current.Format) == 0 {
+			current.Format = fragment.Format
+		}
+		if len(current.Index) == 0 {
+			current.Index = fragment.Index
+		}
+		return details
+	}
+	return append(details, fragment)
 }

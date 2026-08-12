@@ -138,9 +138,9 @@ func TestStreamingCompletionAssemblesToolCallsAndUsage(t *testing.T) {
 		stream := strings.Join([]string{
 			`: OPENROUTER PROCESSING`,
 			``,
-			`data: {"choices":[{"delta":{"role":"assistant","tool_calls":[{"index":0,"id":"call-1","type":"function","function":{"name":"re","arguments":"{\"pa"}}]}}]}`,
+			`data: {"choices":[{"delta":{"role":"assistant","reasoning":"Inspecting the changed file. ","reasoning_details":[{"type":"reasoning.text","text":"Inspecting ","id":"reason-1","index":0}],"tool_calls":[{"index":0,"id":"call-1","type":"function","function":{"name":"re","arguments":"{\"pa"}}]}}]}`,
 			``,
-			`data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"name":"ad","arguments":"th\":\"main.go\"}"}}]},"finish_reason":"tool_calls"}]}`,
+			`data: {"choices":[{"delta":{"reasoning":"Choosing a line range.","reasoning_details":[{"text":"the file"}],"tool_calls":[{"index":0,"function":{"name":"ad","arguments":"th\":\"main.go\"}"}}]},"finish_reason":"tool_calls"}]}`,
 			``,
 			`data: {"choices":[],"usage":{"prompt_tokens":50,"completion_tokens":5,"total_tokens":55,"cost":0.0001}}`,
 			``,
@@ -161,14 +161,49 @@ func TestStreamingCompletionAssemblesToolCallsAndUsage(t *testing.T) {
 	if len(result.ToolCalls) != 1 || result.ToolCalls[0].Function.Name != "read" || result.ToolCalls[0].Function.Arguments != `{"path":"main.go"}` {
 		t.Fatalf("unexpected assembled tool call: %+v", result.ToolCalls)
 	}
+	if result.Reasoning != "Inspecting the changed file. Choosing a line range." {
+		t.Fatalf("stream reasoning was not assembled: %q", result.Reasoning)
+	}
+	if len(result.ReasoningDetails) != 1 || result.ReasoningDetails[0].Text != "Inspecting the file" {
+		t.Fatalf("stream reasoning details were not assembled: %+v", result.ReasoningDetails)
+	}
+	encodedResult, err := json.Marshal(result)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(encodedResult), `"reasoning":"Inspecting the changed file. Choosing a line range."`) || !strings.Contains(string(encodedResult), `"index":0`) {
+		t.Fatalf("reasoning will not be preserved in the next request: %s", encodedResult)
+	}
 	if resultUsage.TotalTokens != 55 || resultUsage.Cost == nil || *resultUsage.Cost != 0.0001 {
 		t.Fatalf("unexpected stream usage: %+v", resultUsage)
 	}
-	if !strings.Contains(logs.String(), "provider is processing") || !strings.Contains(logs.String(), "Receiving streamed response") {
+	if !strings.Contains(logs.String(), "provider is processing") || !strings.Contains(logs.String(), "Receiving streamed response") || !strings.Contains(logs.String(), "reasoning ") {
 		t.Fatalf("missing stream progress logs: %s", logs.String())
 	}
 	if client.http.Timeout != 0 {
 		t.Fatalf("HTTP timeout should defer to review context, got %s", client.http.Timeout)
+	}
+}
+
+func TestExcludeReasoningIsSentWhenConfigured(t *testing.T) {
+	transport := roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		var body request
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatal(err)
+		}
+		if body.Reasoning == nil || !body.Reasoning.Exclude {
+			t.Fatalf("reasoning exclusion was not requested: %+v", body.Reasoning)
+		}
+		responseBody := `{"choices":[{"message":{"role":"assistant","content":"done"}}]}`
+		return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(responseBody))}, nil
+	})
+	client, err := NewClient(Config{Endpoint: "http://model.test/v1", Model: "test-model", ExcludeReasoning: true}, makeSnapshot(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	client.http = &http.Client{Transport: transport}
+	if _, _, err := client.complete(t.Context(), []message{{Role: "user", Content: "review"}}); err != nil {
+		t.Fatal(err)
 	}
 }
 
