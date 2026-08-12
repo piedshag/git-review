@@ -42,6 +42,7 @@ func run() error {
 	debugModelOutput := fs.Bool("debug-model-output", false, "log complete parsed model responses to stderr")
 	inputPrice := fs.Float64("input-price", 0, "input price in US dollars per million tokens")
 	outputPrice := fs.Float64("output-price", 0, "output price in US dollars per million tokens")
+	stream := fs.Bool("stream", true, "stream Chat Completions responses")
 	fs.Usage = func() { fmt.Fprint(fs.Output(), usage); fs.PrintDefaults() }
 	if err := fs.Parse(os.Args[1:]); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
@@ -73,6 +74,7 @@ func run() error {
 		DebugModelOutput: *debugModelOutput,
 		InputPrice:       *inputPrice,
 		OutputPrice:      *outputPrice,
+		Stream:           *stream,
 		LogWriter:        os.Stderr,
 	}, snapshot)
 	if err != nil {

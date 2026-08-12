@@ -125,6 +125,53 @@ func TestDebugModelOutputIsSeparateFromVerboseActivity(t *testing.T) {
 	}
 }
 
+func TestStreamingCompletionAssemblesToolCallsAndUsage(t *testing.T) {
+	var logs bytes.Buffer
+	transport := roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		var body request
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatal(err)
+		}
+		if !body.Stream || body.StreamOptions == nil || !body.StreamOptions.IncludeUsage {
+			t.Fatalf("streaming usage was not requested: %+v", body)
+		}
+		stream := strings.Join([]string{
+			`: OPENROUTER PROCESSING`,
+			``,
+			`data: {"choices":[{"delta":{"role":"assistant","tool_calls":[{"index":0,"id":"call-1","type":"function","function":{"name":"re","arguments":"{\"pa"}}]}}]}`,
+			``,
+			`data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"name":"ad","arguments":"th\":\"main.go\"}"}}]},"finish_reason":"tool_calls"}]}`,
+			``,
+			`data: {"choices":[],"usage":{"prompt_tokens":50,"completion_tokens":5,"total_tokens":55,"cost":0.0001}}`,
+			``,
+			`data: [DONE]`,
+			``,
+		}, "\n")
+		return &http.Response{StatusCode: http.StatusOK, Header: http.Header{"Content-Type": []string{"text/event-stream"}}, Body: io.NopCloser(strings.NewReader(stream))}, nil
+	})
+	client, err := NewClient(Config{Endpoint: "http://model.test/v1", Model: "test-model", Stream: true, Verbose: true, LogWriter: &logs}, makeSnapshot(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	client.http = &http.Client{Transport: transport}
+	result, resultUsage, err := client.complete(t.Context(), []message{{Role: "user", Content: "review"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.ToolCalls) != 1 || result.ToolCalls[0].Function.Name != "read" || result.ToolCalls[0].Function.Arguments != `{"path":"main.go"}` {
+		t.Fatalf("unexpected assembled tool call: %+v", result.ToolCalls)
+	}
+	if resultUsage.TotalTokens != 55 || resultUsage.Cost == nil || *resultUsage.Cost != 0.0001 {
+		t.Fatalf("unexpected stream usage: %+v", resultUsage)
+	}
+	if !strings.Contains(logs.String(), "provider is processing") || !strings.Contains(logs.String(), "receiving streamed response") {
+		t.Fatalf("missing stream progress logs: %s", logs.String())
+	}
+	if client.http.Timeout != 0 {
+		t.Fatalf("HTTP timeout should defer to review context, got %s", client.http.Timeout)
+	}
+}
+
 type roundTripFunc func(*http.Request) (*http.Response, error)
 
 func (fn roundTripFunc) RoundTrip(request *http.Request) (*http.Response, error) {

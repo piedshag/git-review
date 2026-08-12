@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -10,8 +11,8 @@ import (
 	"log"
 	"net/http"
 	"net/url"
+	"sort"
 	"strings"
-	"time"
 )
 
 type Config struct {
@@ -23,6 +24,7 @@ type Config struct {
 	DebugModelOutput bool
 	InputPrice       float64
 	OutputPrice      float64
+	Stream           bool
 	LogWriter        io.Writer
 }
 
@@ -38,6 +40,7 @@ type Client struct {
 	debug       bool
 	inputPrice  float64
 	outputPrice float64
+	stream      bool
 }
 
 type message struct {
@@ -59,19 +62,50 @@ type functionCall struct {
 }
 
 type request struct {
-	Model    string    `json:"model"`
-	Messages []message `json:"messages"`
-	Tools    []Tool    `json:"tools"`
+	Model         string         `json:"model"`
+	Messages      []message      `json:"messages"`
+	Tools         []Tool         `json:"tools"`
+	Stream        bool           `json:"stream,omitempty"`
+	StreamOptions *streamOptions `json:"stream_options,omitempty"`
+}
+
+type streamOptions struct {
+	IncludeUsage bool `json:"include_usage"`
 }
 
 type response struct {
 	Choices []struct {
 		Message message `json:"message"`
 	} `json:"choices"`
-	Error *struct {
-		Message string `json:"message"`
-	} `json:"error,omitempty"`
+	Error *apiError  `json:"error,omitempty"`
 	Usage tokenUsage `json:"usage"`
+}
+
+type apiError struct {
+	Message string `json:"message"`
+	Code    any    `json:"code,omitempty"`
+}
+
+type streamChunk struct {
+	Choices []struct {
+		Delta        messageDelta `json:"delta"`
+		FinishReason string       `json:"finish_reason"`
+	} `json:"choices"`
+	Error *apiError  `json:"error,omitempty"`
+	Usage tokenUsage `json:"usage"`
+}
+
+type messageDelta struct {
+	Role      string          `json:"role"`
+	Content   string          `json:"content"`
+	ToolCalls []toolCallDelta `json:"tool_calls"`
+}
+
+type toolCallDelta struct {
+	Index    int          `json:"index"`
+	ID       string       `json:"id"`
+	Type     string       `json:"type"`
+	Function functionCall `json:"function"`
 }
 
 type tokenUsage struct {
@@ -95,9 +129,10 @@ func NewClient(config Config, repo *Snapshot) (*Client, error) {
 	}
 	client := &Client{
 		endpoint: endpoint, apiKey: config.APIKey, model: config.Model,
-		maxSteps: config.MaxSteps, http: &http.Client{Timeout: 2 * time.Minute}, repo: repo,
+		maxSteps: config.MaxSteps, http: &http.Client{}, repo: repo,
 		verbose: config.Verbose, debug: config.DebugModelOutput,
 		inputPrice: config.InputPrice, outputPrice: config.OutputPrice,
+		stream: config.Stream,
 	}
 	if config.Verbose || config.DebugModelOutput {
 		writer := config.LogWriter
@@ -283,7 +318,11 @@ func (c *Client) logTotal(value tokenUsage, cost float64, costAvailable, costEst
 }
 
 func (c *Client) complete(ctx context.Context, messages []message) (message, tokenUsage, error) {
-	payload, err := json.Marshal(request{Model: c.model, Messages: messages, Tools: c.repo.Tools()})
+	requestBody := request{Model: c.model, Messages: messages, Tools: c.repo.Tools(), Stream: c.stream}
+	if c.stream {
+		requestBody.StreamOptions = &streamOptions{IncludeUsage: true}
+	}
+	payload, err := json.Marshal(requestBody)
 	if err != nil {
 		return message{}, tokenUsage{}, err
 	}
@@ -300,19 +339,23 @@ func (c *Client) complete(ctx context.Context, messages []message) (message, tok
 		return message{}, tokenUsage{}, fmt.Errorf("call model: %w", err)
 	}
 	defer resp.Body.Close()
-	body, err := io.ReadAll(io.LimitReader(resp.Body, 4*1024*1024))
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return message{}, tokenUsage{}, decodeAPIError(resp)
+	}
+	if c.stream {
+		return c.decodeStream(resp.Body)
+	}
+	return decodeCompletion(resp.Body, resp.StatusCode)
+}
+
+func decodeCompletion(reader io.Reader, statusCode int) (message, tokenUsage, error) {
+	body, err := io.ReadAll(io.LimitReader(reader, 4*1024*1024))
 	if err != nil {
 		return message{}, tokenUsage{}, err
 	}
 	var decoded response
 	if err := json.Unmarshal(body, &decoded); err != nil {
-		return message{}, tokenUsage{}, fmt.Errorf("decode model response (HTTP %d): %w", resp.StatusCode, err)
-	}
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		if decoded.Error != nil && decoded.Error.Message != "" {
-			return message{}, tokenUsage{}, fmt.Errorf("model API returned HTTP %d: %s", resp.StatusCode, decoded.Error.Message)
-		}
-		return message{}, tokenUsage{}, fmt.Errorf("model API returned HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
+		return message{}, tokenUsage{}, fmt.Errorf("decode model response (HTTP %d): %w", statusCode, err)
 	}
 	if decoded.Error != nil {
 		return message{}, tokenUsage{}, errors.New(decoded.Error.Message)
@@ -321,4 +364,126 @@ func (c *Client) complete(ctx context.Context, messages []message) (message, tok
 		return message{}, tokenUsage{}, errors.New("model API returned no choices")
 	}
 	return decoded.Choices[0].Message, decoded.Usage, nil
+}
+
+func decodeAPIError(resp *http.Response) error {
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 4*1024*1024))
+	if err != nil {
+		return err
+	}
+	var decoded response
+	if err := json.Unmarshal(body, &decoded); err != nil {
+		return fmt.Errorf("model API returned HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
+	}
+	if decoded.Error != nil && decoded.Error.Message != "" {
+		return fmt.Errorf("model API returned HTTP %d: %s", resp.StatusCode, decoded.Error.Message)
+	}
+	return fmt.Errorf("model API returned HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
+}
+
+func (c *Client) decodeStream(reader io.Reader) (message, tokenUsage, error) {
+	scanner := bufio.NewScanner(reader)
+	scanner.Buffer(make([]byte, 64*1024), 1024*1024)
+	assembled := message{Role: "assistant"}
+	toolCalls := make(map[int]*toolCall)
+	var streamUsage tokenUsage
+	var dataLines []string
+	totalBytes := 0
+	receivingLogged := false
+	processingLogged := false
+
+	processEvent := func() (bool, error) {
+		if len(dataLines) == 0 {
+			return false, nil
+		}
+		data := strings.Join(dataLines, "\n")
+		dataLines = dataLines[:0]
+		if data == "[DONE]" {
+			return true, nil
+		}
+		totalBytes += len(data)
+		if totalBytes > 4*1024*1024 {
+			return false, errors.New("streamed model response exceeded 4 MiB")
+		}
+		var chunk streamChunk
+		if err := json.Unmarshal([]byte(data), &chunk); err != nil {
+			return false, fmt.Errorf("decode streamed model response: %w", err)
+		}
+		if chunk.Error != nil {
+			return false, errors.New(chunk.Error.Message)
+		}
+		if chunk.Usage.reported() {
+			streamUsage = chunk.Usage
+		}
+		for _, choice := range chunk.Choices {
+			if choice.FinishReason == "error" {
+				return false, errors.New("model stream ended with an error")
+			}
+			delta := choice.Delta
+			if delta.Role != "" {
+				assembled.Role = delta.Role
+			}
+			assembled.Content += delta.Content
+			for _, fragment := range delta.ToolCalls {
+				call := toolCalls[fragment.Index]
+				if call == nil {
+					call = &toolCall{}
+					toolCalls[fragment.Index] = call
+				}
+				call.ID += fragment.ID
+				call.Type += fragment.Type
+				call.Function.Name += fragment.Function.Name
+				call.Function.Arguments += fragment.Function.Arguments
+			}
+		}
+		if !receivingLogged && len(chunk.Choices) > 0 {
+			c.activity("receiving streamed response...")
+			receivingLogged = true
+		}
+		return false, nil
+	}
+
+	done := false
+streamLoop:
+	for scanner.Scan() {
+		line := scanner.Text()
+		switch {
+		case line == "":
+			var err error
+			done, err = processEvent()
+			if err != nil {
+				return message{}, tokenUsage{}, err
+			}
+			if done {
+				break streamLoop
+			}
+		case strings.HasPrefix(line, ":"):
+			if !processingLogged {
+				c.activity("provider is processing the streamed request...")
+				processingLogged = true
+			}
+		case strings.HasPrefix(line, "data:"):
+			dataLines = append(dataLines, strings.TrimPrefix(strings.TrimPrefix(line, "data:"), " "))
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		return message{}, tokenUsage{}, fmt.Errorf("read streamed model response: %w", err)
+	}
+	if !done && len(dataLines) > 0 {
+		if _, err := processEvent(); err != nil {
+			return message{}, tokenUsage{}, err
+		}
+	}
+	indexes := make([]int, 0, len(toolCalls))
+	for index := range toolCalls {
+		indexes = append(indexes, index)
+	}
+	sort.Ints(indexes)
+	for _, index := range indexes {
+		assembled.ToolCalls = append(assembled.ToolCalls, *toolCalls[index])
+	}
+	if assembled.Content == "" && len(assembled.ToolCalls) == 0 {
+		return message{}, tokenUsage{}, errors.New("model stream returned neither content nor tool calls")
+	}
+	return assembled, streamUsage, nil
 }
