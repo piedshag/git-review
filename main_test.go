@@ -45,3 +45,14 @@ func TestParseInterspersedHonorsDoubleDash(t *testing.T) {
 		t.Fatalf("verbose=%t args=%v", *verbose, fs.Args())
 	}
 }
+
+func TestValidReasoningEffort(t *testing.T) {
+	for _, value := range []string{"", "none", "minimal", "low", "medium", "high", "xhigh", "max"} {
+		if !validReasoningEffort(value) {
+			t.Errorf("valid effort %q was rejected", value)
+		}
+	}
+	if validReasoningEffort("extreme") {
+		t.Fatal("invalid effort was accepted")
+	}
+}

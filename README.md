@@ -30,6 +30,12 @@ For streamed responses, `-v` reports progress every 100 SSE chunks with raw, vis
 
 If reasoning text itself is not useful, `--exclude-reasoning` asks compatible endpoints such as OpenRouter to omit it from the response. The model still reasons and bills reasoning tokens, but substantially less SSE data may be transferred.
 
+To keep individual tool-selection turns responsive, the CLI defaults to `--reasoning-effort low` and `--max-output-tokens 4096`. Increase either for unusually difficult reviews, or use `--reasoning-effort=` and `--max-output-tokens=0` to leave both decisions to the provider:
+
+```sh
+./git-review feature/my-change --reasoning-effort medium --max-output-tokens 8192
+```
+
 Responses are streamed by default. This keeps long model turns active and lets `-v` report when OpenRouter is still processing or response chunks have started arriving. The configurable overall `--timeout` governs the entire review; there is no shorter per-request deadline. Use `--stream=false` for an endpoint that does not support Chat Completions streaming.
 
 Each model turn has a 64 MiB response budget, including streamed reasoning and provider metadata. Increase it for unusually large responses with `--max-response-mib`; the allowed range is 1–1024 MiB.

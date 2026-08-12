@@ -31,6 +31,8 @@ type Config struct {
 	ProgressWriter   io.Writer
 	MaxResponseBytes int
 	ExcludeReasoning bool
+	ReasoningEffort  string
+	MaxOutputTokens  int
 }
 
 type Client struct {
@@ -49,6 +51,8 @@ type Client struct {
 	progress         *spinner
 	maxResponseBytes int
 	excludeReasoning bool
+	reasoningEffort  string
+	maxOutputTokens  int
 }
 
 type message struct {
@@ -72,12 +76,14 @@ type functionCall struct {
 }
 
 type request struct {
-	Model         string            `json:"model"`
-	Messages      []message         `json:"messages"`
-	Tools         []Tool            `json:"tools"`
-	Stream        bool              `json:"stream,omitempty"`
-	StreamOptions *streamOptions    `json:"stream_options,omitempty"`
-	Reasoning     *reasoningOptions `json:"reasoning,omitempty"`
+	Model               string            `json:"model"`
+	Messages            []message         `json:"messages"`
+	Tools               []Tool            `json:"tools"`
+	Stream              bool              `json:"stream,omitempty"`
+	StreamOptions       *streamOptions    `json:"stream_options,omitempty"`
+	Reasoning           *reasoningOptions `json:"reasoning,omitempty"`
+	ReasoningEffort     string            `json:"reasoning_effort,omitempty"`
+	MaxCompletionTokens int               `json:"max_completion_tokens,omitempty"`
 }
 
 type streamOptions struct {
@@ -90,7 +96,8 @@ type reasoningOptions struct {
 
 type response struct {
 	Choices []struct {
-		Message message `json:"message"`
+		Message      message `json:"message"`
+		FinishReason string  `json:"finish_reason"`
 	} `json:"choices"`
 	Error *apiError  `json:"error,omitempty"`
 	Usage tokenUsage `json:"usage"`
@@ -180,6 +187,8 @@ func NewClient(config Config, repo *Snapshot) (*Client, error) {
 		stream:           config.Stream,
 		maxResponseBytes: maxResponseBytes,
 		excludeReasoning: config.ExcludeReasoning,
+		reasoningEffort:  config.ReasoningEffort,
+		maxOutputTokens:  config.MaxOutputTokens,
 	}
 	if config.Verbose || config.DebugModelOutput {
 		writer := config.LogWriter
@@ -203,7 +212,7 @@ func (c *Client) Review(ctx context.Context) (string, error) {
 		defer c.progress.Stop()
 	}
 	messages := []message{
-		{Role: "system", Content: `You are a meticulous code reviewer. Inspect the branch using the provided read-only Git tools. Start with stat, then read every materially changed file and use grep/glob for context. Review only changes introduced between base and target. Report only concrete, actionable defects; do not report style preferences. For each finding give severity, file, target-branch line number, impact, and a concise fix. If there are no findings, say so explicitly. Never invent file contents or claim to have run code.`},
+		{Role: "system", Content: `You are a meticulous code reviewer. Inspect the branch using the provided read-only Git tools. Start with stat, then read every materially changed file and use grep/glob for context. Call tools promptly and keep each tool-selection turn brief. Review only changes introduced between base and target. Report only concrete, actionable defects; do not report style preferences. For each finding give severity, file, target-branch line number, impact, and a concise fix. If there are no findings, say so explicitly. Never invent file contents or claim to have run code.`},
 		{Role: "user", Content: "Review " + c.repo.Description() + "."},
 	}
 	c.activity("reviewing %s", c.repo.Description())
@@ -437,6 +446,8 @@ func byteCount(size int) string {
 
 func (c *Client) complete(ctx context.Context, messages []message) (message, tokenUsage, error) {
 	requestBody := request{Model: c.model, Messages: messages, Tools: c.repo.Tools(), Stream: c.stream}
+	requestBody.ReasoningEffort = c.reasoningEffort
+	requestBody.MaxCompletionTokens = c.maxOutputTokens
 	if c.excludeReasoning {
 		requestBody.Reasoning = &reasoningOptions{Exclude: true}
 	}
@@ -487,6 +498,9 @@ func decodeCompletion(reader io.Reader, statusCode, limit int) (message, tokenUs
 	if len(decoded.Choices) == 0 {
 		return message{}, tokenUsage{}, errors.New("model API returned no choices")
 	}
+	if decoded.Choices[0].FinishReason == "length" {
+		return message{}, tokenUsage{}, errors.New("model exhausted its output-token limit before completing the turn; increase --max-output-tokens or lower --reasoning-effort")
+	}
 	return decoded.Choices[0].Message, decoded.Usage, nil
 }
 
@@ -516,6 +530,7 @@ func (c *Client) decodeStream(reader io.Reader) (message, tokenUsage, error) {
 	streamStarted := time.Now()
 	receivingLogged := false
 	processingLogged := false
+	finishReason := ""
 
 	processEvent := func() (bool, error) {
 		if len(dataLines) == 0 {
@@ -542,6 +557,9 @@ func (c *Client) decodeStream(reader io.Reader) (message, tokenUsage, error) {
 			streamUsage = chunk.Usage
 		}
 		for _, choice := range chunk.Choices {
+			if choice.FinishReason != "" {
+				finishReason = choice.FinishReason
+			}
 			if choice.FinishReason == "error" {
 				return false, errors.New("model stream ended with an error")
 			}
@@ -619,6 +637,9 @@ streamLoop:
 	}
 	if err := scanner.Err(); err != nil {
 		return message{}, tokenUsage{}, fmt.Errorf("read streamed model response: %w", err)
+	}
+	if finishReason == "length" {
+		return message{}, tokenUsage{}, fmt.Errorf("model exhausted the %d-token output limit before completing the turn; increase --max-output-tokens or lower --reasoning-effort", c.maxOutputTokens)
 	}
 	if !done && len(dataLines) > 0 {
 		if _, err := processEvent(); err != nil {

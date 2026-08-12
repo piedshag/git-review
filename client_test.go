@@ -207,6 +207,40 @@ func TestExcludeReasoningIsSentWhenConfigured(t *testing.T) {
 	}
 }
 
+func TestGenerationControlsAreSent(t *testing.T) {
+	transport := roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		var body request
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatal(err)
+		}
+		if body.ReasoningEffort != "low" || body.MaxCompletionTokens != 4096 {
+			t.Fatalf("generation controls were not sent: effort=%q max=%d", body.ReasoningEffort, body.MaxCompletionTokens)
+		}
+		responseBody := `{"choices":[{"message":{"role":"assistant","content":"done"}}]}`
+		return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(responseBody))}, nil
+	})
+	client, err := NewClient(Config{Endpoint: "http://model.test/v1", Model: "test-model", ReasoningEffort: "low", MaxOutputTokens: 4096}, makeSnapshot(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	client.http = &http.Client{Transport: transport}
+	if _, _, err := client.complete(t.Context(), []message{{Role: "user", Content: "review"}}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestStreamingCompletionReportsOutputLimit(t *testing.T) {
+	client, err := NewClient(Config{Endpoint: "http://model.test/v1", Model: "test-model", MaxOutputTokens: 4096}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stream := "data: {\"choices\":[{\"delta\":{\"reasoning\":\"still thinking\"},\"finish_reason\":\"length\"}]}\n\ndata: [DONE]\n\n"
+	_, _, err = client.decodeStream(strings.NewReader(stream))
+	if err == nil || !strings.Contains(err.Error(), "exhausted the 4096-token output limit") {
+		t.Fatalf("expected actionable output limit error, got %v", err)
+	}
+}
+
 func TestStreamingCompletionHonorsConfiguredResponseLimit(t *testing.T) {
 	client, err := NewClient(Config{Endpoint: "http://model.test/v1", Model: "test-model", MaxResponseBytes: 100}, nil)
 	if err != nil {
