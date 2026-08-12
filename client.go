@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"net/url"
 	"strings"
@@ -14,10 +15,12 @@ import (
 )
 
 type Config struct {
-	Endpoint string
-	APIKey   string
-	Model    string
-	MaxSteps int
+	Endpoint  string
+	APIKey    string
+	Model     string
+	MaxSteps  int
+	Verbose   bool
+	LogWriter io.Writer
 }
 
 type Client struct {
@@ -27,6 +30,7 @@ type Client struct {
 	maxSteps int
 	http     *http.Client
 	repo     *Snapshot
+	logger   *log.Logger
 }
 
 type message struct {
@@ -74,7 +78,15 @@ func NewClient(config Config, repo *Snapshot) (*Client, error) {
 	if !strings.HasSuffix(endpoint, "/chat/completions") {
 		endpoint += "/chat/completions"
 	}
-	return &Client{endpoint: endpoint, apiKey: config.APIKey, model: config.Model, maxSteps: config.MaxSteps, http: &http.Client{Timeout: 2 * time.Minute}, repo: repo}, nil
+	client := &Client{endpoint: endpoint, apiKey: config.APIKey, model: config.Model, maxSteps: config.MaxSteps, http: &http.Client{Timeout: 2 * time.Minute}, repo: repo}
+	if config.Verbose {
+		writer := config.LogWriter
+		if writer == nil {
+			writer = io.Discard
+		}
+		client.logger = log.New(writer, "git-review: ", log.LstdFlags)
+	}
+	return client, nil
 }
 
 func (c *Client) Review(ctx context.Context) (string, error) {
@@ -87,6 +99,7 @@ func (c *Client) Review(ctx context.Context) (string, error) {
 		if err != nil {
 			return "", err
 		}
+		c.logModelResponse(step+1, assistant)
 		messages = append(messages, assistant)
 		if len(assistant.ToolCalls) == 0 {
 			if strings.TrimSpace(assistant.Content) == "" {
@@ -100,6 +113,18 @@ func (c *Client) Review(ctx context.Context) (string, error) {
 		}
 	}
 	return "", fmt.Errorf("model exceeded the %d-step tool limit", c.maxSteps)
+}
+
+func (c *Client) logModelResponse(step int, assistant message) {
+	if c.logger == nil {
+		return
+	}
+	encoded, err := json.Marshal(assistant)
+	if err != nil {
+		c.logger.Printf("model response step=%d: <could not encode: %v>", step, err)
+		return
+	}
+	c.logger.Printf("model response step=%d: %s", step, encoded)
 }
 
 func (c *Client) complete(ctx context.Context, messages []message) (message, error) {

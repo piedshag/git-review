@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -19,6 +20,7 @@ import (
 func TestReviewExecutesToolCallAndReturnsReport(t *testing.T) {
 	snapshot := makeSnapshot(t)
 	var calls atomic.Int32
+	var logs bytes.Buffer
 	transport := roundTripFunc(func(r *http.Request) (*http.Response, error) {
 		if r.URL.Path != "/v1/chat/completions" {
 			t.Errorf("unexpected API path %q", r.URL.Path)
@@ -46,7 +48,7 @@ func TestReviewExecutesToolCallAndReturnsReport(t *testing.T) {
 		return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(responseBody))}, nil
 	})
 
-	client, err := NewClient(Config{Endpoint: "http://model.test/v1", APIKey: "test-key", Model: "test-model", MaxSteps: 3}, snapshot)
+	client, err := NewClient(Config{Endpoint: "http://model.test/v1", APIKey: "test-key", Model: "test-model", MaxSteps: 3, Verbose: true, LogWriter: &logs}, snapshot)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -57,6 +59,22 @@ func TestReviewExecutesToolCallAndReturnsReport(t *testing.T) {
 	}
 	if report != "No findings." || calls.Load() != 2 {
 		t.Fatalf("report=%q calls=%d", report, calls.Load())
+	}
+	logOutput := logs.String()
+	for _, expected := range []string{"model response step=1", `"name":"stat"`, "model response step=2", "No findings."} {
+		if !strings.Contains(logOutput, expected) {
+			t.Errorf("verbose log does not contain %q:\n%s", expected, logOutput)
+		}
+	}
+}
+
+func TestReviewDoesNotLogByDefault(t *testing.T) {
+	client, err := NewClient(Config{Endpoint: "http://model.test/v1", Model: "test-model", MaxSteps: 1}, makeSnapshot(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if client.logger != nil {
+		t.Fatal("logger is enabled without Verbose")
 	}
 }
 

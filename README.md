@@ -10,6 +10,12 @@ go build -o git-review .
 OPENAI_API_KEY=... ./git-review --base main feature/my-change
 ```
 
+Pass `-v` to log each parsed model response, including tool calls and the final response, to stderr. The final review remains on stdout, so it can still be redirected independently:
+
+```sh
+./git-review -v --base main feature/my-change >review.txt
+```
+
 For a local or hosted OpenAI-compatible Chat Completions endpoint:
 
 ```sh
