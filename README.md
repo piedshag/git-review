@@ -2,6 +2,8 @@
 
 A small, read-only Go CLI that asks an OpenAI-compatible model to review a Git branch. The model can inspect the repository through four bounded tools—`stat`, `glob`, `grep`, and `read`—all implemented against immutable Git objects with [`go-git`](https://github.com/go-git/go-git). The program does not invoke Git, a shell, or any other subprocess.
 
+The model must finish through a validated `submit_review` tool. Output is deterministic Markdown: every finding has a `critical`, `high`, `medium`, or `low` severity, a summary of at most 12 words, a detailed explanation, and an exact file and line. An empty submission renders an explicit “No findings” result.
+
 ## Build and run
 
 ```sh
@@ -57,7 +59,7 @@ OPENAI_MODEL=my-tool-capable-model \
 ## Security model
 
 - Repository content comes from commit trees and blobs, not the checked-out filesystem.
-- The model chooses only among four fixed, read-only functions. It cannot provide commands or arbitrary revisions.
+- The model chooses only among four fixed, read-only repository functions plus the validated terminal `submit_review` function. It cannot provide commands or arbitrary revisions.
 - Reads, search results, payloads, tool turns, and review duration are bounded.
 - No subprocess API is used anywhere in the application.
 

@@ -35,7 +35,7 @@ func TestReviewExecutesToolCallAndReturnsReport(t *testing.T) {
 		}
 		responseBody := ""
 		if calls.Add(1) == 1 {
-			if len(body.Tools) != 4 {
+			if len(body.Tools) != 5 {
 				t.Errorf("got %d tools", len(body.Tools))
 			}
 			responseBody = `{"choices":[{"message":{"role":"assistant","tool_calls":[{"id":"call-1","type":"function","function":{"name":"stat","arguments":"{}"}}]}}],"usage":{"prompt_tokens":100,"completion_tokens":10,"total_tokens":110,"cost":0.001}}`
@@ -44,7 +44,7 @@ func TestReviewExecutesToolCallAndReturnsReport(t *testing.T) {
 			if last.Role != "tool" || last.ToolCallID != "call-1" {
 				t.Errorf("tool result was not appended correctly: %+v", last)
 			}
-			responseBody = `{"choices":[{"message":{"role":"assistant","content":"No findings."}}],"usage":{"prompt_tokens":200,"completion_tokens":20,"total_tokens":220,"cost":0.002}}`
+			responseBody = `{"choices":[{"message":{"role":"assistant","tool_calls":[{"id":"call-2","type":"function","function":{"name":"submit_review","arguments":"{\"findings\":[]}"}}]}}],"usage":{"prompt_tokens":200,"completion_tokens":20,"total_tokens":220,"cost":0.002}}`
 		}
 		return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(responseBody))}, nil
 	})
@@ -58,7 +58,7 @@ func TestReviewExecutesToolCallAndReturnsReport(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if report != "No findings." || calls.Load() != 2 {
+	if report != "# Review\n\nNo findings." || calls.Load() != 2 {
 		t.Fatalf("report=%q calls=%d", report, calls.Load())
 	}
 	logOutput := logs.String()
@@ -75,6 +75,39 @@ func TestReviewExecutesToolCallAndReturnsReport(t *testing.T) {
 	}
 	if strings.Contains(logOutput, `"role":"assistant"`) {
 		t.Errorf("verbose log unexpectedly contains raw model output:\n%s", logOutput)
+	}
+}
+
+func TestReviewRejectsFreeFormFinalTextUntilSubmitted(t *testing.T) {
+	snapshot := makeSnapshot(t)
+	var calls atomic.Int32
+	transport := roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		var body request
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatal(err)
+		}
+		if calls.Add(1) == 1 {
+			responseBody := `{"choices":[{"message":{"role":"assistant","content":"Looks fine."}}]}`
+			return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(responseBody))}, nil
+		}
+		last := body.Messages[len(body.Messages)-1]
+		if last.Role != "user" || !strings.Contains(last.Content, "submit_review") {
+			t.Fatalf("missing structured-submission correction: %+v", last)
+		}
+		responseBody := `{"choices":[{"message":{"role":"assistant","tool_calls":[{"id":"submit","type":"function","function":{"name":"submit_review","arguments":"{\"findings\":[]}"}}]}}]}`
+		return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(responseBody))}, nil
+	})
+	client, err := NewClient(Config{Endpoint: "http://model.test/v1", Model: "test-model", MaxSteps: 3}, snapshot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	client.http = &http.Client{Transport: transport}
+	report, err := client.Review(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report != "# Review\n\nNo findings." || calls.Load() != 2 {
+		t.Fatalf("report=%q calls=%d", report, calls.Load())
 	}
 }
 

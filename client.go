@@ -210,7 +210,7 @@ func (c *Client) Review(ctx context.Context) (string, error) {
 		defer c.progress.Stop()
 	}
 	messages := []message{
-		{Role: "system", Content: `You are a meticulous code reviewer. Inspect the branch using the provided read-only Git tools. Start with stat, then read every materially changed file and use grep/glob for context. Call tools promptly and keep each tool-selection turn brief. Review only changes introduced between base and target. Report only concrete, actionable defects; do not report style preferences. For each finding give severity, file, target-branch line number, impact, and a concise fix. If there are no findings, say so explicitly. Never invent file contents or claim to have run code.`},
+		{Role: "system", Content: `You are a meticulous code reviewer. Inspect the branch using the provided read-only Git tools. Start with stat, then read every materially changed file and use grep/glob for context. Call tools promptly and keep each tool-selection turn brief. Review only changes introduced between base and target. Report only concrete, actionable defects; do not report style preferences. Finish only by calling submit_review exactly once and by itself. Each finding requires a severity, a short summary, a detailed explanation of the defect and impact with a suggested fix, and an exact target-branch file and line. Submit an empty findings array when there are no defects. Never invent file contents or claim to have run code.`},
 		{Role: "user", Content: "Review " + c.repo.Description() + "."},
 	}
 	c.activity("reviewing %s", c.repo.Description())
@@ -264,8 +264,18 @@ func (c *Client) Review(ctx context.Context) (string, error) {
 		}
 		messages = append(messages, assistant)
 		if len(assistant.ToolCalls) == 0 {
-			if strings.TrimSpace(assistant.Content) == "" {
-				return "", errors.New("model returned neither content nor tool calls")
+			c.activity("model returned free-form output; requesting submit_review")
+			messages = append(messages, message{Role: "user", Content: "Complete the review by calling submit_review. Free-form final text is not accepted."})
+			continue
+		}
+		if len(assistant.ToolCalls) == 1 && assistant.ToolCalls[0].Function.Name == submitReviewToolName {
+			call := assistant.ToolCalls[0]
+			c.logToolCall(call)
+			findings, submissionErr := parseReviewSubmission(call.Function.Arguments)
+			if submissionErr != nil {
+				c.activity("review submission rejected: %v", submissionErr)
+				messages = append(messages, message{Role: "tool", ToolCallID: call.ID, Content: "error: invalid review submission: " + submissionErr.Error()})
+				continue
 			}
 			if usageSeen {
 				c.logTotal(total, totalCost, costComplete, costEstimated, usageComplete)
@@ -275,11 +285,16 @@ func (c *Client) Review(ctx context.Context) (string, error) {
 			if c.progress != nil {
 				c.progress.Finish()
 			}
-			return assistant.Content, nil
+			return renderReview(findings), nil
 		}
 		for _, call := range assistant.ToolCalls {
 			c.logToolCall(call)
-			result := c.repo.Call(call.Function.Name, call.Function.Arguments)
+			result := ""
+			if call.Function.Name == submitReviewToolName {
+				result = "error: submit_review must be called exactly once and by itself"
+			} else {
+				result = c.repo.Call(call.Function.Name, call.Function.Arguments)
+			}
 			messages = append(messages, message{Role: "tool", ToolCallID: call.ID, Content: result})
 		}
 	}
@@ -344,6 +359,15 @@ func (c *Client) logToolCall(call toolCall) {
 			lineRange = fmt.Sprintf("lines %d-%d", args.Start, args.End)
 		}
 		c.toolActivity("Reading %q from %s (%s)", args.Path, ref, lineRange)
+	case submitReviewToolName:
+		var submission struct {
+			Findings []json.RawMessage `json:"findings"`
+		}
+		if err := json.Unmarshal([]byte(call.Function.Arguments), &submission); err == nil && submission.Findings != nil {
+			c.toolActivity("Submitting review with %d findings", len(submission.Findings))
+		} else {
+			c.toolActivity("Submitting review")
+		}
 	default:
 		c.toolActivity("Using %q", call.Function.Name)
 	}
@@ -492,7 +516,7 @@ func byteCount(size int) string {
 }
 
 func (c *Client) complete(ctx context.Context, messages []message) (message, tokenUsage, error) {
-	requestBody := request{Model: c.model, Messages: messages, Tools: c.repo.Tools(), Stream: c.stream}
+	requestBody := request{Model: c.model, Messages: messages, Tools: c.tools(), Stream: c.stream}
 	requestBody.ReasoningEffort = c.reasoningEffort
 	if c.excludeReasoning {
 		requestBody.Reasoning = &reasoningOptions{Exclude: true}
@@ -524,6 +548,11 @@ func (c *Client) complete(ctx context.Context, messages []message) (message, tok
 		return c.decodeStream(resp.Body)
 	}
 	return decodeCompletion(resp.Body, resp.StatusCode, c.maxResponseBytes)
+}
+
+func (c *Client) tools() []Tool {
+	tools := append([]Tool(nil), c.repo.Tools()...)
+	return append(tools, submitReviewTool())
 }
 
 func decodeCompletion(reader io.Reader, statusCode, limit int) (message, tokenUsage, error) {
