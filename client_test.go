@@ -164,7 +164,7 @@ func TestStreamingCompletionAssemblesToolCallsAndUsage(t *testing.T) {
 	if resultUsage.TotalTokens != 55 || resultUsage.Cost == nil || *resultUsage.Cost != 0.0001 {
 		t.Fatalf("unexpected stream usage: %+v", resultUsage)
 	}
-	if !strings.Contains(logs.String(), "provider is processing") || !strings.Contains(logs.String(), "receiving streamed response") {
+	if !strings.Contains(logs.String(), "provider is processing") || !strings.Contains(logs.String(), "Receiving streamed response") {
 		t.Fatalf("missing stream progress logs: %s", logs.String())
 	}
 	if client.http.Timeout != 0 {

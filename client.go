@@ -13,6 +13,7 @@ import (
 	"net/url"
 	"sort"
 	"strings"
+	"time"
 )
 
 type Config struct {
@@ -199,6 +200,11 @@ func (c *Client) Review(ctx context.Context) (string, error) {
 			}
 			if usageSeen {
 				c.logTotal(total, totalCost, costComplete, costEstimated, usageComplete)
+			} else {
+				c.activity("review complete (token usage unavailable)")
+			}
+			if c.progress != nil {
+				c.progress.Finish()
 			}
 			return assistant.Content, nil
 		}
@@ -227,7 +233,7 @@ func (c *Client) activity(format string, args ...any) {
 	if c.logger != nil && c.verbose {
 		c.logger.Printf(format, args...)
 	} else if c.progress != nil {
-		c.progress.Set(format, args...)
+		c.progress.Next(format, args...)
 	}
 }
 
@@ -274,7 +280,7 @@ func (c *Client) toolActivity(format string, args ...any) {
 	if c.logger != nil && c.verbose {
 		c.logger.Printf("tool: "+strings.ToLower(format[:1])+format[1:], args...)
 	} else if c.progress != nil {
-		c.progress.Set(format, args...)
+		c.progress.Next(format, args...)
 	}
 }
 
@@ -300,9 +306,6 @@ func (c *Client) usageCost(value tokenUsage) (cost float64, available, estimated
 }
 
 func (c *Client) logUsage(label string, step int, value tokenUsage, cost float64, costAvailable, costEstimated bool) {
-	if c.logger == nil || !c.verbose {
-		return
-	}
 	message := fmt.Sprintf("usage %s=%d: %d input + %d output = %d tokens", label, step, value.PromptTokens, value.CompletionTokens, value.TotalTokens)
 	if costAvailable {
 		costLabel := "cost"
@@ -313,13 +316,14 @@ func (c *Client) logUsage(label string, step int, value tokenUsage, cost float64
 	} else {
 		message += ", cost unavailable"
 	}
-	c.logger.Print(message)
+	if c.logger != nil && c.verbose {
+		c.logger.Print(message)
+	} else if c.progress != nil {
+		c.progress.Next("%s", message)
+	}
 }
 
 func (c *Client) logTotal(value tokenUsage, cost float64, costAvailable, costEstimated, usageComplete bool) {
-	if c.logger == nil || !c.verbose {
-		return
-	}
 	usageLabel := ""
 	if !usageComplete {
 		usageLabel = "reported "
@@ -334,7 +338,28 @@ func (c *Client) logTotal(value tokenUsage, cost float64, costAvailable, costEst
 	} else {
 		message += ", total cost unavailable"
 	}
-	c.logger.Print(message)
+	if c.logger != nil && c.verbose {
+		c.logger.Print(message)
+	} else if c.progress != nil {
+		c.progress.Next("%s", message)
+	}
+}
+
+func (c *Client) streamActivity(chunks, bytes int, started time.Time) {
+	if c.progress != nil {
+		c.progress.Update("Receiving streamed response: %d chunks, %s", chunks, byteCount(bytes))
+		return
+	}
+	if c.logger != nil && c.verbose && chunks%100 == 0 {
+		c.logger.Printf("stream: received %d chunks, %s in %s", chunks, byteCount(bytes), elapsed(started))
+	}
+}
+
+func byteCount(size int) string {
+	if size < 1024 {
+		return fmt.Sprintf("%d B", size)
+	}
+	return fmt.Sprintf("%.1f KiB", float64(size)/1024)
 }
 
 func (c *Client) complete(ctx context.Context, messages []message) (message, tokenUsage, error) {
@@ -409,6 +434,8 @@ func (c *Client) decodeStream(reader io.Reader) (message, tokenUsage, error) {
 	var streamUsage tokenUsage
 	var dataLines []string
 	totalBytes := 0
+	chunks := 0
+	streamStarted := time.Now()
 	receivingLogged := false
 	processingLogged := false
 
@@ -422,6 +449,7 @@ func (c *Client) decodeStream(reader io.Reader) (message, tokenUsage, error) {
 			return true, nil
 		}
 		totalBytes += len(data)
+		chunks++
 		if totalBytes > 4*1024*1024 {
 			return false, errors.New("streamed model response exceeded 4 MiB")
 		}
@@ -457,8 +485,11 @@ func (c *Client) decodeStream(reader io.Reader) (message, tokenUsage, error) {
 			}
 		}
 		if !receivingLogged && len(chunk.Choices) > 0 {
-			c.activity("receiving streamed response...")
+			c.activity("Receiving streamed response")
 			receivingLogged = true
+		}
+		if receivingLogged {
+			c.streamActivity(chunks, totalBytes, streamStarted)
 		}
 		return false, nil
 	}

@@ -9,14 +9,21 @@ import (
 func TestSpinnerRendersStatusAndClearsLine(t *testing.T) {
 	var output bytes.Buffer
 	spinner := newSpinner(&output)
-	spinner.Set("Thinking (step %d)...", 2)
-	spinner.Stop()
+	spinner.Next("Thinking (step %d)...", 2)
+	spinner.Next("Receiving streamed response")
+	spinner.Update("Receiving streamed response: %d chunks, %s", 12, "4.2 KiB")
+	spinner.Finish()
 
 	if !strings.Contains(output.String(), "Thinking (step 2)...") {
 		t.Fatalf("spinner did not render status: %q", output.String())
 	}
-	if !strings.HasSuffix(output.String(), "\r\x1b[2K") {
-		t.Fatalf("spinner did not clear its line: %q", output.String())
+	for _, expected := range []string{"✓ Thinking (step 2)...", "Receiving streamed response: 12 chunks, 4.2 KiB"} {
+		if !strings.Contains(output.String(), expected) {
+			t.Fatalf("spinner trail does not contain %q: %q", expected, output.String())
+		}
+	}
+	if !strings.HasSuffix(output.String(), "\n") {
+		t.Fatalf("finished spinner did not leave a complete line: %q", output.String())
 	}
 }
 
