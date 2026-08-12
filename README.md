@@ -26,6 +26,8 @@ Use `--debug-model-output` when the complete parsed assistant responses are need
 
 Responses are streamed by default. This keeps long model turns active and lets `-v` report when OpenRouter is still processing or response chunks have started arriving. The configurable overall `--timeout` governs the entire review; there is no shorter per-request deadline. Use `--stream=false` for an endpoint that does not support Chat Completions streaming.
 
+When stderr is an interactive terminal, the CLI shows a single-line progress spinner without requiring `-v`. It is automatically disabled for redirected output and CI logs; use `-v` there when persistent activity logs are useful.
+
 For a local or hosted OpenAI-compatible Chat Completions endpoint:
 
 ```sh

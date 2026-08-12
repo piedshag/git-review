@@ -76,6 +76,8 @@ func run() error {
 		OutputPrice:      *outputPrice,
 		Stream:           *stream,
 		LogWriter:        os.Stderr,
+		Progress:         terminalOutput(os.Stderr),
+		ProgressWriter:   os.Stderr,
 	}, snapshot)
 	if err != nil {
 		return err
@@ -89,6 +91,14 @@ func run() error {
 	}
 	fmt.Println(review)
 	return nil
+}
+
+func terminalOutput(file *os.File) bool {
+	if strings.EqualFold(os.Getenv("TERM"), "dumb") {
+		return false
+	}
+	info, err := file.Stat()
+	return err == nil && info.Mode()&os.ModeCharDevice != 0
 }
 
 func env(key, fallback string) string {

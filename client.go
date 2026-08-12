@@ -26,6 +26,8 @@ type Config struct {
 	OutputPrice      float64
 	Stream           bool
 	LogWriter        io.Writer
+	Progress         bool
+	ProgressWriter   io.Writer
 }
 
 type Client struct {
@@ -41,6 +43,7 @@ type Client struct {
 	inputPrice  float64
 	outputPrice float64
 	stream      bool
+	progress    *spinner
 }
 
 type message struct {
@@ -141,10 +144,20 @@ func NewClient(config Config, repo *Snapshot) (*Client, error) {
 		}
 		client.logger = log.New(writer, "git-review: ", log.LstdFlags)
 	}
+	if config.Progress && !config.Verbose && !config.DebugModelOutput {
+		writer := config.ProgressWriter
+		if writer == nil {
+			writer = io.Discard
+		}
+		client.progress = newSpinner(writer)
+	}
 	return client, nil
 }
 
 func (c *Client) Review(ctx context.Context) (string, error) {
+	if c.progress != nil {
+		defer c.progress.Stop()
+	}
 	messages := []message{
 		{Role: "system", Content: `You are a meticulous code reviewer. Inspect the branch using the provided read-only Git tools. Start with stat, then read every materially changed file and use grep/glob for context. Review only changes introduced between base and target. Report only concrete, actionable defects; do not report style preferences. For each finding give severity, file, target-branch line number, impact, and a concise fix. If there are no findings, say so explicitly. Never invent file contents or claim to have run code.`},
 		{Role: "user", Content: "Review " + c.repo.Description() + "."},
@@ -213,13 +226,12 @@ func (c *Client) logModelResponse(step int, assistant message) {
 func (c *Client) activity(format string, args ...any) {
 	if c.logger != nil && c.verbose {
 		c.logger.Printf(format, args...)
+	} else if c.progress != nil {
+		c.progress.Set(format, args...)
 	}
 }
 
 func (c *Client) logToolCall(call toolCall) {
-	if c.logger == nil || !c.verbose {
-		return
-	}
 	var args struct {
 		Pattern string `json:"pattern"`
 		Glob    string `json:"glob"`
@@ -229,7 +241,7 @@ func (c *Client) logToolCall(call toolCall) {
 		End     int    `json:"end"`
 	}
 	if err := json.Unmarshal([]byte(call.Function.Arguments), &args); err != nil {
-		c.logger.Printf("tool: %q with invalid arguments", call.Function.Name)
+		c.toolActivity("Using %q with invalid arguments", call.Function.Name)
 		return
 	}
 	ref := args.Ref
@@ -238,23 +250,31 @@ func (c *Client) logToolCall(call toolCall) {
 	}
 	switch call.Function.Name {
 	case "stat":
-		c.logger.Print("tool: inspecting changed-file statistics")
+		c.toolActivity("Inspecting changed-file statistics")
 	case "glob":
-		c.logger.Printf("tool: listing %q in %s", args.Pattern, ref)
+		c.toolActivity("Listing %q in %s", args.Pattern, ref)
 	case "grep":
 		if args.Glob == "" {
-			c.logger.Printf("tool: grepping %s for %q", ref, args.Pattern)
+			c.toolActivity("Grepping %s for %q", ref, args.Pattern)
 		} else {
-			c.logger.Printf("tool: grepping %s files matching %q for %q", ref, args.Glob, args.Pattern)
+			c.toolActivity("Grepping %s files matching %q for %q", ref, args.Glob, args.Pattern)
 		}
 	case "read":
 		lineRange := "all lines"
 		if args.Start > 0 || args.End > 0 {
 			lineRange = fmt.Sprintf("lines %d-%d", args.Start, args.End)
 		}
-		c.logger.Printf("tool: reading %q from %s (%s)", args.Path, ref, lineRange)
+		c.toolActivity("Reading %q from %s (%s)", args.Path, ref, lineRange)
 	default:
-		c.logger.Printf("tool: %q", call.Function.Name)
+		c.toolActivity("Using %q", call.Function.Name)
+	}
+}
+
+func (c *Client) toolActivity(format string, args ...any) {
+	if c.logger != nil && c.verbose {
+		c.logger.Printf("tool: "+strings.ToLower(format[:1])+format[1:], args...)
+	} else if c.progress != nil {
+		c.progress.Set(format, args...)
 	}
 }
 
