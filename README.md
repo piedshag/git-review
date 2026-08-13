@@ -4,6 +4,32 @@ A small, read-only Go CLI that asks an OpenAI-compatible model to review a Git b
 
 The model must finish through a validated `submit_review` tool. Every finding has a `critical`, `high`, `medium`, or `low` severity, a summary of at most 12 words, a detailed explanation, and an exact file and line. An empty submission renders an explicit “No findings” result.
 
+## Philosophy
+
+`git-review` follows the Unix principle of doing one thing well: it reviews the
+changes introduced by a Git branch. It does not check out branches, modify the
+working tree, post comments, manage pull requests, or run builds and tests.
+Those jobs belong to other tools.
+
+The command is designed to compose with those tools. The review is written to
+stdout in deterministic Markdown or structured JSON, while progress and
+diagnostics are written to stderr. Flags can appear on either side of the branch
+name, review policy can come from a flag, file, stdin, or environment variable,
+and exit behavior is suitable for CI pipelines.
+
+The model receives capabilities, not general machine access. Its only repository
+operations are the fixed `stat`, `glob`, `grep`, and `read` tools. These tools use
+`go-git` to read immutable base and target commit objects; they do not read the
+checked-out worktree and cannot address arbitrary revisions. The model is never
+given a shell, a command-execution tool, filesystem APIs, network tools, or a way
+to modify Git data. Only the host process contacts the configured model endpoint.
+
+This boundary is intentional: even if a repository contains malicious prompt
+injection, the model can only request bounded reads from the selected Git
+snapshots and submit a structured review. Keep new features within that narrow
+contract whenever possible, and prefer external composition over adding broader
+capabilities to the reviewer.
+
 ## Build and run
 
 ```sh
@@ -52,6 +78,30 @@ generate-review-policy | ./git-review feature/my-change --instructions-file -
 ```
 
 `GIT_REVIEW_INSTRUCTIONS` provides the same value through the environment.
+
+## Parallel focused reviews
+
+`review-parallel.sh` runs three independent reviewers concurrently: one focused
+on security, one on code quality, and one on general correctness. Build the
+binary first, then pass the normal review arguments to the script:
+
+```sh
+go build -o git-review .
+./review-parallel.sh --base main feature/my-change >review.md
+```
+
+Progress from each reviewer is prefixed on stderr. The combined result is
+written to stdout, preserving the normal Unix-friendly separation. JSON output
+is also supported:
+
+```sh
+./review-parallel.sh --format json --base main feature/my-change >review.json
+```
+
+Use `--binary PATH` or `GIT_REVIEW_BIN` when the executable is elsewhere. Set
+`GIT_REVIEW_INSTRUCTIONS` to append common project-specific guidance to all
+three focused prompts. Because these are three independent model conversations,
+expect roughly three times the tokens and cost of a single review.
 
 When the endpoint includes `usage.cost`, the activity log reports it. Otherwise, pass the model's prices in US dollars per million tokens to estimate cost locally:
 
