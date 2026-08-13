@@ -31,7 +31,7 @@ func TestParseAndRenderReview(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	review := renderReview(findings)
+	review := renderMarkdown(Review{Status: ReviewComplete, Findings: findings})
 	critical := "## [CRITICAL] Prevent credential exposure\n\n`main.go:10`"
 	low := "## [LOW] Handle empty response\n\n`client.go:42`"
 	if !strings.Contains(review, critical) || !strings.Contains(review, low) {
@@ -47,7 +47,8 @@ func TestRenderReviewWithNoFindings(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if review := renderReview(findings); review != "# Review\n\nNo findings." {
+	expected := "# Review\n\nNo findings.\n\n---\n\n**Review stats:** token usage unavailable · cost unavailable · time 0s"
+	if review := renderMarkdown(Review{Status: ReviewComplete, Findings: findings}); review != expected {
 		t.Fatalf("unexpected empty review: %q", review)
 	}
 }

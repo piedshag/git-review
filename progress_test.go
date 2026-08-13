@@ -2,8 +2,10 @@ package main
 
 import (
 	"bytes"
+	"io"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestSpinnerRendersStatusAndClearsLine(t *testing.T) {
@@ -29,18 +31,53 @@ func TestSpinnerRendersStatusAndClearsLine(t *testing.T) {
 
 func TestVerboseLoggingTakesPrecedenceOverSpinner(t *testing.T) {
 	var output bytes.Buffer
-	client, err := NewClient(Config{
-		Endpoint:       "http://model.test/v1",
-		Model:          "test-model",
-		Verbose:        true,
-		LogWriter:      &output,
-		Progress:       true,
-		ProgressWriter: &output,
-	}, nil)
-	if err != nil {
-		t.Fatal(err)
+	reporter := newReporter(&output, true, false, true)
+	if _, ok := reporter.(*textReporter); !ok {
+		t.Fatalf("verbose mode should use text reporter, got %T", reporter)
 	}
-	if client.logger == nil || client.progress != nil {
-		t.Fatalf("verbose logger and spinner should be mutually exclusive: logger=%v progress=%v", client.logger, client.progress)
+	reporter.Next("reviewing feature")
+	if !strings.Contains(output.String(), "reviewing feature") {
+		t.Fatalf("text reporter did not log activity: %q", output.String())
+	}
+}
+
+func TestReporterKeepsDebugOutputExplicit(t *testing.T) {
+	var verboseOutput bytes.Buffer
+	verbose := newReporter(&verboseOutput, true, false, false)
+	verbose.Debug("model response: secret reasoning")
+	if verboseOutput.Len() != 0 {
+		t.Fatalf("verbose mode leaked debug output: %q", verboseOutput.String())
+	}
+
+	var debugOutput bytes.Buffer
+	debug := newReporter(&debugOutput, false, true, false)
+	debug.Debug("model response: parsed response")
+	if !strings.Contains(debugOutput.String(), "parsed response") {
+		t.Fatalf("debug reporter omitted model output: %q", debugOutput.String())
+	}
+}
+
+func TestReporterIsSilentForNonInteractiveDefault(t *testing.T) {
+	reporter := newReporter(io.Discard, false, false, false)
+	if _, ok := reporter.(discardReporter); !ok {
+		t.Fatalf("non-interactive default should be silent, got %T", reporter)
+	}
+}
+
+func TestSpinnerStreamStatusStaysCompact(t *testing.T) {
+	var output bytes.Buffer
+	reporter := newReporter(&output, false, false, true)
+	reporter.Next("Receiving streamed response")
+	reporter.Stream(streamStats{
+		Chunks: 323, RawBytes: 133 * 1024, ReasoningBytes: 12 * 1024,
+		LatestKind: "reasoning", Latest: strings.Repeat("gAAAA", 30),
+	}, time.Now().Add(-14*time.Second))
+	reporter.Finish()
+
+	if strings.Contains(output.String(), "gAAAA") || strings.Contains(output.String(), "latest reasoning") {
+		t.Fatalf("spinner exposed verbose stream preview: %q", output.String())
+	}
+	if !strings.Contains(output.String(), "Receiving: 323 chunks / 133.0 KiB") {
+		t.Fatalf("spinner omitted compact stream progress: %q", output.String())
 	}
 }

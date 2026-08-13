@@ -1,9 +1,11 @@
 package main
 
 import (
+	"bytes"
 	"flag"
 	"io"
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -54,5 +56,30 @@ func TestValidReasoningEffort(t *testing.T) {
 	}
 	if validReasoningEffort("extreme") {
 		t.Fatal("invalid effort was accepted")
+	}
+}
+
+func TestParseOptionsSupportsFormatAndInstructionsAfterBranch(t *testing.T) {
+	t.Setenv("GIT_REVIEW_INSTRUCTIONS", "")
+	options, err := parseOptions([]string{"feature", "--format", "json", "--instructions", "Focus on migrations"}, io.Discard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if options.branch != "feature" || options.format != FormatJSON || options.instructions != "Focus on migrations" {
+		t.Fatalf("unexpected options: %+v", options)
+	}
+}
+
+func TestLoadInstructionsFromStdin(t *testing.T) {
+	instructions, err := loadInstructions("", "-", strings.NewReader("  Check API compatibility.\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if instructions != "Check API compatibility." {
+		t.Fatalf("unexpected instructions: %q", instructions)
+	}
+	tooLarge := bytes.NewReader(bytes.Repeat([]byte("x"), maxInstructionsBytes+1))
+	if _, err := loadInstructions("", "-", tooLarge); err == nil {
+		t.Fatal("oversized instructions were accepted")
 	}
 }
