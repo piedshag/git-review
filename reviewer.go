@@ -1,0 +1,214 @@
+package main
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"strings"
+	"time"
+)
+
+type ReviewerConfig struct {
+	MaxSteps     int
+	Instructions string
+	InputPrice   float64
+	OutputPrice  float64
+	Reporter     Reporter
+}
+
+type Reviewer struct {
+	model        completionClient
+	repo         *Snapshot
+	tools        []Tool
+	maxSteps     int
+	instructions string
+	inputPrice   float64
+	outputPrice  float64
+	reporter     Reporter
+}
+
+func newReviewer(config ReviewerConfig, repo *Snapshot, model completionClient) (*Reviewer, error) {
+	if repo == nil {
+		return nil, errors.New("repository snapshot is required")
+	}
+	if model == nil {
+		return nil, errors.New("model client is required")
+	}
+	if config.MaxSteps < 1 || config.MaxSteps > 100 {
+		return nil, errors.New("max steps must be between 1 and 100")
+	}
+	reporter := config.Reporter
+	if reporter == nil {
+		reporter = discardReporter{}
+	}
+	tools := append([]Tool(nil), repo.Tools()...)
+	tools = append(tools, submitReviewTool())
+	return &Reviewer{
+		model:        model,
+		repo:         repo,
+		tools:        tools,
+		maxSteps:     config.MaxSteps,
+		instructions: reviewInstructions(config.Instructions),
+		inputPrice:   config.InputPrice,
+		outputPrice:  config.OutputPrice,
+		reporter:     reporter,
+	}, nil
+}
+
+func (r *Reviewer) Review(ctx context.Context) (Review, error) {
+	started := time.Now()
+	defer r.reporter.Close()
+	messages := []message{
+		{Role: "system", Content: r.instructions},
+		{Role: "user", Content: "Review " + r.repo.Description() + "."},
+	}
+	usage := newUsageTracker(r.inputPrice, r.outputPrice)
+	r.reporter.Next("reviewing %s", r.repo.Description())
+
+	for step := 1; step <= r.maxSteps; step++ {
+		r.reporter.Next("thinking (step %d)...", step)
+		assistant, turnUsage, err := r.model.Complete(ctx, messages, r.tools)
+		if err != nil {
+			if errors.Is(err, errOutputLimit) {
+				return r.finishInconclusive(usage, step, turnUsage, started,
+					"The model response was truncated by a provider output limit before the review completed. No clean-review conclusion can be drawn. Consider lowering --reasoning-effort or selecting a model with a larger output allowance.",
+					"review inconclusive: provider output limit reached"), nil
+			}
+			if errors.Is(err, context.DeadlineExceeded) {
+				return r.finishInconclusive(usage, step, turnUsage, started,
+					"The configured review timeout elapsed before the review completed. No clean-review conclusion can be drawn. Increase --timeout if the model needs more time.",
+					"review inconclusive: timeout reached"), nil
+			}
+			return Review{}, err
+		}
+		r.debugResponse(step, assistant)
+		r.recordUsage(usage, step, turnUsage)
+		messages = append(messages, assistant)
+
+		if len(assistant.ToolCalls) == 0 {
+			r.reporter.Next("model returned free-form output; requesting submit_review")
+			messages = append(messages, message{Role: "user", Content: "Complete the review by calling submit_review. Free-form final text is not accepted."})
+			continue
+		}
+		if findings, call, ok := reviewSubmission(assistant.ToolCalls); ok {
+			r.reportToolCall(call)
+			parsed, submissionErr := parseReviewSubmission(findings)
+			if submissionErr != nil {
+				r.reporter.Next("review submission rejected: %v", submissionErr)
+				messages = append(messages, message{Role: "tool", ToolCallID: call.ID, Content: "error: invalid review submission: " + submissionErr.Error()})
+				continue
+			}
+			duration := time.Since(started)
+			r.reporter.Next("%s", usage.Summary("review complete", duration))
+			r.reporter.Finish()
+			return Review{Status: ReviewComplete, Findings: parsed, Stats: usage.Stats(duration)}, nil
+		}
+		messages = r.runTools(messages, assistant.ToolCalls)
+	}
+	return Review{}, fmt.Errorf("model exceeded the %d-step tool limit", r.maxSteps)
+}
+
+func (r *Reviewer) finishInconclusive(usage *usageTracker, step int, turnUsage tokenUsage, started time.Time, message, activity string) Review {
+	r.recordUsage(usage, step, turnUsage)
+	duration := time.Since(started)
+	r.reporter.Next("%s", usage.Summary(activity, duration))
+	r.reporter.Finish()
+	return inconclusiveReview(message, usage.Stats(duration))
+}
+
+func reviewSubmission(calls []toolCall) (string, toolCall, bool) {
+	if len(calls) != 1 || calls[0].Function.Name != submitReviewToolName {
+		return "", toolCall{}, false
+	}
+	return calls[0].Function.Arguments, calls[0], true
+}
+
+func (r *Reviewer) runTools(messages []message, calls []toolCall) []message {
+	for _, call := range calls {
+		r.reportToolCall(call)
+		result := ""
+		if call.Function.Name == submitReviewToolName {
+			result = "error: submit_review must be called exactly once and by itself"
+		} else {
+			result = r.repo.Call(call.Function.Name, call.Function.Arguments)
+		}
+		messages = append(messages, message{Role: "tool", ToolCallID: call.ID, Content: result})
+	}
+	return messages
+}
+
+func (r *Reviewer) recordUsage(usage *usageTracker, step int, value tokenUsage) {
+	if !value.reported() {
+		usage.Missing()
+		r.reporter.Next("usage step=%d: provider did not report token usage", step)
+		return
+	}
+	r.reporter.Next("usage step=%d: %s", step, usage.Add(value))
+}
+
+func (r *Reviewer) debugResponse(step int, assistant message) {
+	encoded, err := json.Marshal(assistant)
+	if err != nil {
+		r.reporter.Debug("model response step=%d: <could not encode: %v>", step, err)
+		return
+	}
+	r.reporter.Debug("model response step=%d: %s", step, encoded)
+}
+
+func (r *Reviewer) reportToolCall(call toolCall) {
+	r.reporter.Next("tool: %s", strings.ToLower(describeToolCall(call)))
+}
+
+func describeToolCall(call toolCall) string {
+	var args struct {
+		Pattern string `json:"pattern"`
+		Glob    string `json:"glob"`
+		Path    string `json:"path"`
+		Ref     string `json:"ref"`
+		Start   int    `json:"start"`
+		End     int    `json:"end"`
+	}
+	if err := json.Unmarshal([]byte(call.Function.Arguments), &args); err != nil {
+		return fmt.Sprintf("Using %q with invalid arguments", call.Function.Name)
+	}
+	ref := args.Ref
+	if ref == "" {
+		ref = "target"
+	}
+	switch call.Function.Name {
+	case "stat":
+		return "Inspecting changed-file statistics"
+	case "glob":
+		return fmt.Sprintf("Listing %q in %s", args.Pattern, ref)
+	case "grep":
+		if args.Glob == "" {
+			return fmt.Sprintf("Grepping %s for %q", ref, args.Pattern)
+		}
+		return fmt.Sprintf("Grepping %s files matching %q for %q", ref, args.Glob, args.Pattern)
+	case "read":
+		lineRange := "all lines"
+		if args.Start > 0 || args.End > 0 {
+			lineRange = fmt.Sprintf("lines %d-%d", args.Start, args.End)
+		}
+		return fmt.Sprintf("Reading %q from %s (%s)", args.Path, ref, lineRange)
+	case submitReviewToolName:
+		var submission struct {
+			Findings []json.RawMessage `json:"findings"`
+		}
+		if err := json.Unmarshal([]byte(call.Function.Arguments), &submission); err == nil && submission.Findings != nil {
+			return fmt.Sprintf("Submitting review with %d findings", len(submission.Findings))
+		}
+		return "Submitting review"
+	default:
+		return fmt.Sprintf("Using %q", call.Function.Name)
+	}
+}
+
+func inconclusiveReview(message string, stats ReviewStats) Review {
+	return Review{
+		Status:  ReviewInconclusive,
+		Message: message,
+		Stats:   stats,
+	}
+}

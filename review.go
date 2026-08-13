@@ -7,17 +7,44 @@ import (
 	"path"
 	"sort"
 	"strings"
+	"time"
 	"unicode/utf8"
 )
 
 const submitReviewToolName = "submit_review"
 
-type reviewFinding struct {
+type ReviewStatus string
+
+const (
+	ReviewComplete     ReviewStatus = "complete"
+	ReviewInconclusive ReviewStatus = "inconclusive"
+)
+
+type Review struct {
+	Status   ReviewStatus `json:"status"`
+	Findings []Finding    `json:"findings"`
+	Message  string       `json:"message,omitempty"`
+	Stats    ReviewStats  `json:"stats"`
+}
+
+type Finding struct {
 	Severity    string `json:"severity"`
 	Summary     string `json:"summary"`
 	Explanation string `json:"explanation"`
 	File        string `json:"file"`
 	Line        int    `json:"line"`
+}
+
+type ReviewStats struct {
+	DurationMS     int64    `json:"duration_ms"`
+	InputTokens    int      `json:"input_tokens"`
+	OutputTokens   int      `json:"output_tokens"`
+	TotalTokens    int      `json:"total_tokens"`
+	UsageAvailable bool     `json:"usage_available"`
+	UsageComplete  bool     `json:"usage_complete"`
+	Cost           *float64 `json:"cost,omitempty"`
+	CostEstimated  bool     `json:"cost_estimated,omitempty"`
+	CostComplete   bool     `json:"cost_complete"`
 }
 
 func submitReviewTool() Tool {
@@ -45,7 +72,7 @@ func submitReviewTool() Tool {
 	}}
 }
 
-func parseReviewSubmission(arguments string) ([]reviewFinding, error) {
+func parseReviewSubmission(arguments string) ([]Finding, error) {
 	var fields map[string]json.RawMessage
 	if err := json.Unmarshal([]byte(arguments), &fields); err != nil {
 		return nil, fmt.Errorf("invalid JSON: %w", err)
@@ -67,7 +94,7 @@ func parseReviewSubmission(arguments string) ([]reviewFinding, error) {
 	if len(rawItems) > 100 {
 		return nil, errors.New("findings cannot contain more than 100 items")
 	}
-	findings := make([]reviewFinding, len(rawItems))
+	findings := make([]Finding, len(rawItems))
 	for i, rawItem := range rawItems {
 		decoder := json.NewDecoder(strings.NewReader(string(rawItem)))
 		decoder.DisallowUnknownFields()
@@ -86,7 +113,7 @@ func parseReviewSubmission(arguments string) ([]reviewFinding, error) {
 	return findings, nil
 }
 
-func validateFinding(finding reviewFinding) error {
+func validateFinding(finding Finding) error {
 	switch finding.Severity {
 	case "critical", "high", "medium", "low":
 	default:
@@ -110,11 +137,8 @@ func validateFinding(finding reviewFinding) error {
 	return nil
 }
 
-func renderReview(findings []reviewFinding) string {
-	if len(findings) == 0 {
-		return "# Review\n\nNo findings."
-	}
-	ordered := append([]reviewFinding(nil), findings...)
+func sortedFindings(findings []Finding) []Finding {
+	ordered := append([]Finding(nil), findings...)
 	sort.SliceStable(ordered, func(i, j int) bool {
 		left, right := severityRank(ordered[i].Severity), severityRank(ordered[j].Severity)
 		if left != right {
@@ -125,19 +149,65 @@ func renderReview(findings []reviewFinding) string {
 		}
 		return ordered[i].Line < ordered[j].Line
 	})
+	return ordered
+}
 
-	var output strings.Builder
-	output.WriteString("# Review\n\n")
-	for i, finding := range ordered {
-		if i > 0 {
+func renderMarkdown(review Review) string {
+	body := ""
+	if review.Status == ReviewInconclusive {
+		body = "# Review\n\n**Inconclusive:** " + review.Message
+	} else if len(review.Findings) == 0 {
+		body = "# Review\n\nNo findings."
+	} else {
+		ordered := sortedFindings(review.Findings)
+		var output strings.Builder
+		output.WriteString("# Review\n\n")
+		for i, finding := range ordered {
+			if i > 0 {
+				output.WriteString("\n")
+			}
+			fmt.Fprintf(&output, "## [%s] %s\n\n", strings.ToUpper(finding.Severity), finding.Summary)
+			fmt.Fprintf(&output, "`%s:%d`\n\n", strings.ReplaceAll(finding.File, "`", "\\`"), finding.Line)
+			output.WriteString(finding.Explanation)
 			output.WriteString("\n")
 		}
-		fmt.Fprintf(&output, "## [%s] %s\n\n", strings.ToUpper(finding.Severity), finding.Summary)
-		fmt.Fprintf(&output, "`%s:%d`\n\n", strings.ReplaceAll(finding.File, "`", "\\`"), finding.Line)
-		output.WriteString(finding.Explanation)
-		output.WriteString("\n")
+		body = strings.TrimSpace(output.String())
 	}
-	return strings.TrimSpace(output.String())
+	return body + "\n\n---\n\n**Review stats:** " + formatReviewStats(review.Stats)
+}
+
+func formatReviewStats(stats ReviewStats) string {
+	parts := make([]string, 0, 3)
+	if stats.UsageAvailable {
+		tokens := fmt.Sprintf("%d input + %d output = %d tokens", stats.InputTokens, stats.OutputTokens, stats.TotalTokens)
+		if !stats.UsageComplete {
+			tokens += " (reported; incomplete)"
+		}
+		parts = append(parts, tokens)
+	} else {
+		parts = append(parts, "token usage unavailable")
+	}
+	if stats.Cost != nil {
+		label := "cost"
+		if stats.CostEstimated {
+			label = "estimated cost"
+		}
+		parts = append(parts, fmt.Sprintf("%s $%.6f", label, *stats.Cost))
+	} else {
+		parts = append(parts, "cost unavailable")
+	}
+	parts = append(parts, "time "+humanDuration(time.Duration(stats.DurationMS)*time.Millisecond))
+	return strings.Join(parts, " · ")
+}
+
+func humanDuration(duration time.Duration) string {
+	if duration < time.Second {
+		return duration.Round(time.Millisecond).String()
+	}
+	if duration < time.Minute {
+		return duration.Round(100 * time.Millisecond).String()
+	}
+	return duration.Round(time.Second).String()
 }
 
 func severityRank(severity string) int {
