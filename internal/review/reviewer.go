@@ -1,4 +1,4 @@
-package main
+package review
 
 import (
 	"context"
@@ -7,28 +7,31 @@ import (
 	"fmt"
 	"strings"
 	"time"
+
+	"github.com/piedshag/git-review/internal/agent"
+	"github.com/piedshag/git-review/internal/gitrepo"
 )
 
-type ReviewerConfig struct {
+type Config struct {
 	MaxSteps     int
 	Instructions string
 	InputPrice   float64
 	OutputPrice  float64
-	Reporter     Reporter
+	Reporter     agent.Reporter
 }
 
 type Reviewer struct {
-	model        completionClient
-	repo         *Snapshot
+	model        agent.CompletionClient
+	repo         *gitrepo.Snapshot
 	tools        []Tool
 	maxSteps     int
 	instructions string
 	inputPrice   float64
 	outputPrice  float64
-	reporter     Reporter
+	reporter     agent.Reporter
 }
 
-func newReviewer(config ReviewerConfig, repo *Snapshot, model completionClient) (*Reviewer, error) {
+func New(config Config, repo *gitrepo.Snapshot, model agent.CompletionClient) (*Reviewer, error) {
 	if repo == nil {
 		return nil, errors.New("repository snapshot is required")
 	}
@@ -40,7 +43,7 @@ func newReviewer(config ReviewerConfig, repo *Snapshot, model completionClient) 
 	}
 	reporter := config.Reporter
 	if reporter == nil {
-		reporter = discardReporter{}
+		reporter = agent.NopReporter{}
 	}
 	tools := append([]Tool(nil), repo.Tools()...)
 	tools = append(tools, submitReviewTool())
@@ -58,6 +61,7 @@ func newReviewer(config ReviewerConfig, repo *Snapshot, model completionClient) 
 
 func (r *Reviewer) Review(ctx context.Context) (Review, error) {
 	started := time.Now()
+	limits := newReviewLimits(ctx, started, r.maxSteps)
 	defer r.reporter.Close()
 	messages := []message{
 		{Role: "system", Content: r.instructions},
@@ -67,20 +71,28 @@ func (r *Reviewer) Review(ctx context.Context) (Review, error) {
 	r.reporter.Next("reviewing %s", r.repo.Description())
 
 	for step := 1; step <= r.maxSteps; step++ {
+		turnContext, cancelTurn, notice := limits.BeginTurn(ctx, step)
+		if notice != nil {
+			r.reporter.Next("%s", notice.activity)
+			messages = append(messages, message{Role: "user", Content: notice.feedback})
+		}
 		r.reporter.Next("thinking (step %d)...", step)
-		assistant, turnUsage, err := r.model.Complete(ctx, messages, r.tools)
+		assistant, turnUsage, err := r.model.Complete(turnContext, messages, r.tools)
+		cancelTurn()
 		if err != nil {
-			if errors.Is(err, errOutputLimit) {
+			decision := limits.HandleError(ctx, step, err)
+			switch decision.action {
+			case limitRetry:
+				r.recordUsage(usage, step, turnUsage)
+				r.reporter.Next("%s", decision.activity)
+				messages = append(messages, message{Role: "user", Content: decision.feedback})
+				continue
+			case limitInconclusive:
 				return r.finishInconclusive(usage, step, turnUsage, started,
-					"The model response was truncated by a provider output limit before the review completed. No clean-review conclusion can be drawn. Consider lowering --reasoning-effort or selecting a model with a larger output allowance.",
-					"review inconclusive: provider output limit reached"), nil
+					decision.message, decision.activity), nil
+			default:
+				return Review{}, err
 			}
-			if errors.Is(err, context.DeadlineExceeded) {
-				return r.finishInconclusive(usage, step, turnUsage, started,
-					"The configured review timeout elapsed before the review completed. No clean-review conclusion can be drawn. Increase --timeout if the model needs more time.",
-					"review inconclusive: timeout reached"), nil
-			}
-			return Review{}, err
 		}
 		r.debugResponse(step, assistant)
 		r.recordUsage(usage, step, turnUsage)
@@ -91,9 +103,9 @@ func (r *Reviewer) Review(ctx context.Context) (Review, error) {
 			messages = append(messages, message{Role: "user", Content: "Complete the review by calling submit_review. Free-form final text is not accepted."})
 			continue
 		}
-		if findings, call, ok := reviewSubmission(assistant.ToolCalls); ok {
+		if arguments, call, ok := reviewSubmission(assistant.ToolCalls); ok {
 			r.reportToolCall(call)
-			parsed, submissionErr := parseReviewSubmission(findings)
+			submission, submissionErr := parseReviewSubmission(arguments)
 			if submissionErr != nil {
 				r.reporter.Next("review submission rejected: %v", submissionErr)
 				messages = append(messages, message{Role: "tool", ToolCallID: call.ID, Content: "error: invalid review submission: " + submissionErr.Error()})
@@ -102,11 +114,18 @@ func (r *Reviewer) Review(ctx context.Context) (Review, error) {
 			duration := time.Since(started)
 			r.reporter.Next("%s", usage.Summary("review complete", duration))
 			r.reporter.Finish()
-			return Review{Status: ReviewComplete, Findings: parsed, Stats: usage.Stats(duration)}, nil
+			return Review{
+				Status: ReviewComplete, Summary: submission.Summary, Strengths: submission.Strengths,
+				Weaknesses: submission.Weaknesses, Findings: submission.Findings, Stats: usage.Stats(duration),
+			}, nil
 		}
 		messages = r.runTools(messages, assistant.ToolCalls)
 	}
-	return Review{}, fmt.Errorf("model exceeded the %d-step tool limit", r.maxSteps)
+	decision := limits.Exhausted()
+	duration := time.Since(started)
+	r.reporter.Next("%s", usage.Summary(decision.activity, duration))
+	r.reporter.Finish()
+	return inconclusiveReview(decision.message, usage.Stats(duration)), nil
 }
 
 func (r *Reviewer) finishInconclusive(usage *usageTracker, step int, turnUsage tokenUsage, started time.Time, message, activity string) Review {
@@ -139,7 +158,7 @@ func (r *Reviewer) runTools(messages []message, calls []toolCall) []message {
 }
 
 func (r *Reviewer) recordUsage(usage *usageTracker, step int, value tokenUsage) {
-	if !value.reported() {
+	if !value.Reported() {
 		usage.Missing()
 		r.reporter.Next("usage step=%d: provider did not report token usage", step)
 		return

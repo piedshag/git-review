@@ -1,4 +1,4 @@
-package main
+package openai
 
 import (
 	"bytes"
@@ -8,6 +8,8 @@ import (
 	"net/http"
 	"strings"
 	"testing"
+
+	"github.com/piedshag/git-review/internal/report"
 )
 
 func TestOpenAIClientSendsCompatibleChatCompletionRequest(t *testing.T) {
@@ -28,7 +30,7 @@ func TestOpenAIClientSendsCompatibleChatCompletionRequest(t *testing.T) {
 		}
 		return jsonResponse(`{"choices":[{"message":{"role":"assistant","content":"done"}}]}`), nil
 	})
-	client := makeOpenAIClient(t, OpenAIConfig{Endpoint: "http://model.test/v1", APIKey: "test-key", Model: "test-model", ExcludeReasoning: true, ReasoningEffort: "medium"}, transport)
+	client := makeOpenAIClient(t, Config{Endpoint: "http://model.test/v1", APIKey: "test-key", Model: "test-model", ExcludeReasoning: true, ReasoningEffort: "medium"}, transport)
 	result, _, err := client.Complete(t.Context(), []message{{Role: "user", Content: "review"}}, nil)
 	if err != nil || result.Content != "done" {
 		t.Fatalf("result=%+v err=%v", result, err)
@@ -62,8 +64,8 @@ func TestStreamingCompletionAssemblesToolCallsAndUsage(t *testing.T) {
 		}, "\n")
 		return &http.Response{StatusCode: http.StatusOK, Header: http.Header{"Content-Type": []string{"text/event-stream"}}, Body: io.NopCloser(strings.NewReader(stream))}, nil
 	})
-	reporter := newReporter(&logs, true, false, false)
-	client := makeOpenAIClient(t, OpenAIConfig{Endpoint: "http://model.test/v1", Model: "test-model", Stream: true, Reporter: reporter}, transport)
+	reporter := report.New(&logs, true, false, false)
+	client := makeOpenAIClient(t, Config{Endpoint: "http://model.test/v1", Model: "test-model", Stream: true, Reporter: reporter}, transport)
 	result, usage, err := client.Complete(t.Context(), []message{{Role: "user", Content: "review"}}, nil)
 	if err != nil {
 		t.Fatal(err)
@@ -85,7 +87,7 @@ func TestStreamingCompletionAssemblesToolCallsAndUsage(t *testing.T) {
 }
 
 func TestStreamingCompletionReportsProviderOutputLimit(t *testing.T) {
-	client := makeOpenAIClient(t, OpenAIConfig{Endpoint: "http://model.test/v1", Model: "test-model"}, nil)
+	client := makeOpenAIClient(t, Config{Endpoint: "http://model.test/v1", Model: "test-model"}, nil)
 	stream := "data: {\"choices\":[{\"delta\":{\"reasoning\":\"still thinking\"},\"finish_reason\":\"length\"}]}\n\ndata: [DONE]\n\n"
 	_, _, err := client.decodeStream(strings.NewReader(stream))
 	if !errors.Is(err, errOutputLimit) {
@@ -94,19 +96,19 @@ func TestStreamingCompletionReportsProviderOutputLimit(t *testing.T) {
 }
 
 func TestStreamingResponseLimitIncludesCommentsAndFraming(t *testing.T) {
-	client, err := newOpenAIClient(OpenAIConfig{Endpoint: "http://model.test/v1", Model: "test-model", MaxResponseBytes: 100})
+	client, err := New(Config{Endpoint: "http://model.test/v1", Model: "test-model", MaxResponseBytes: 100})
 	if err != nil {
 		t.Fatal(err)
 	}
 	stream := strings.Repeat(": provider keepalive metadata\r\n", 5)
 	_, _, err = client.decodeStream(strings.NewReader(stream))
-	if err == nil || !strings.Contains(err.Error(), "exceeded 100 B limit") {
+	if !errors.Is(err, errResponseLimit) || !strings.Contains(err.Error(), "100 B") {
 		t.Fatalf("expected comments and framing to consume response budget, got %v", err)
 	}
 }
 
 func TestStreamingCompletionRejectsEOFBeforeDone(t *testing.T) {
-	client := makeOpenAIClient(t, OpenAIConfig{Endpoint: "http://model.test/v1", Model: "test-model"}, nil)
+	client := makeOpenAIClient(t, Config{Endpoint: "http://model.test/v1", Model: "test-model"}, nil)
 	stream := "data: {\"choices\":[{\"delta\":{\"content\":\"partial\"},\"finish_reason\":\"stop\"}]}\n\n"
 	_, _, err := client.decodeStream(strings.NewReader(stream))
 	if err == nil || !strings.Contains(err.Error(), "before the [DONE] event") {
@@ -115,7 +117,7 @@ func TestStreamingCompletionRejectsEOFBeforeDone(t *testing.T) {
 }
 
 func TestStreamingCompletionChecksPendingFinishReasonAtEOF(t *testing.T) {
-	client := makeOpenAIClient(t, OpenAIConfig{Endpoint: "http://model.test/v1", Model: "test-model"}, nil)
+	client := makeOpenAIClient(t, Config{Endpoint: "http://model.test/v1", Model: "test-model"}, nil)
 	stream := "data: {\"choices\":[{\"delta\":{\"reasoning\":\"partial\"},\"finish_reason\":\"length\"}]}"
 	_, _, err := client.decodeStream(strings.NewReader(stream))
 	if !errors.Is(err, errOutputLimit) {
@@ -124,7 +126,7 @@ func TestStreamingCompletionChecksPendingFinishReasonAtEOF(t *testing.T) {
 }
 
 func TestStreamingCompletionAcceptsDoneAtEOF(t *testing.T) {
-	client := makeOpenAIClient(t, OpenAIConfig{Endpoint: "http://model.test/v1", Model: "test-model"}, nil)
+	client := makeOpenAIClient(t, Config{Endpoint: "http://model.test/v1", Model: "test-model"}, nil)
 	stream := "data: {\"choices\":[{\"delta\":{\"content\":\"complete\"},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]"
 	result, _, err := client.decodeStream(strings.NewReader(stream))
 	if err != nil || result.Content != "complete" {
@@ -156,30 +158,30 @@ func TestEncryptedReasoningDataIsMetadataNotPreviewText(t *testing.T) {
 }
 
 func TestCompletionResponseLimits(t *testing.T) {
-	client, err := newOpenAIClient(OpenAIConfig{Endpoint: "http://model.test/v1", Model: "test-model", MaxResponseBytes: 100})
+	client, err := New(Config{Endpoint: "http://model.test/v1", Model: "test-model", MaxResponseBytes: 100})
 	if err != nil {
 		t.Fatal(err)
 	}
 	events := strings.Repeat("data: {\"choices\":[]}\n\n", 8) + "data: [DONE]\n\n"
-	if _, _, err := client.decodeStream(strings.NewReader(events)); err == nil || !strings.Contains(err.Error(), "exceeded 100 B limit") {
+	if _, _, err := client.decodeStream(strings.NewReader(events)); !errors.Is(err, errResponseLimit) || !strings.Contains(err.Error(), "100 B") {
 		t.Fatalf("expected stream limit error, got %v", err)
 	}
 	body := `{"choices":[{"message":{"role":"assistant","content":"a response larger than the configured limit"}}]}`
-	if _, _, err := decodeCompletion(strings.NewReader(body), http.StatusOK, 20); err == nil || !strings.Contains(err.Error(), "exceeded 20 B limit") {
+	if _, _, err := decodeCompletion(strings.NewReader(body), http.StatusOK, 20); !errors.Is(err, errResponseLimit) || !strings.Contains(err.Error(), "20 B") {
 		t.Fatalf("expected response limit error, got %v", err)
 	}
 }
 
 func TestNewOpenAIClientRejectsNonURL(t *testing.T) {
-	_, err := newOpenAIClient(OpenAIConfig{Endpoint: "localhost:1234", Model: "test"})
+	_, err := New(Config{Endpoint: "localhost:1234", Model: "test"})
 	if err == nil || !strings.Contains(err.Error(), "invalid endpoint") {
 		t.Fatalf("expected invalid endpoint error, got %v", err)
 	}
 }
 
-func makeOpenAIClient(t *testing.T, config OpenAIConfig, transport http.RoundTripper) *openAIClient {
+func makeOpenAIClient(t *testing.T, config Config, transport http.RoundTripper) *Client {
 	t.Helper()
-	client, err := newOpenAIClient(config)
+	client, err := New(config)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -187,6 +189,12 @@ func makeOpenAIClient(t *testing.T, config OpenAIConfig, transport http.RoundTri
 		client.http = &http.Client{Transport: transport}
 	}
 	return client
+}
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (fn roundTripFunc) RoundTrip(request *http.Request) (*http.Response, error) {
+	return fn(request)
 }
 
 func jsonResponse(body string) *http.Response {

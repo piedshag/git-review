@@ -1,4 +1,4 @@
-package main
+package openai
 
 import (
 	"bytes"
@@ -10,9 +10,11 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+
+	"github.com/piedshag/git-review/internal/agent"
 )
 
-type OpenAIConfig struct {
+type Config struct {
 	Endpoint         string
 	APIKey           string
 	Model            string
@@ -20,14 +22,10 @@ type OpenAIConfig struct {
 	MaxResponseBytes int
 	ExcludeReasoning bool
 	ReasoningEffort  string
-	Reporter         Reporter
+	Reporter         agent.Reporter
 }
 
-type completionClient interface {
-	Complete(context.Context, []message, []Tool) (message, tokenUsage, error)
-}
-
-type openAIClient struct {
+type Client struct {
 	endpoint         string
 	apiKey           string
 	model            string
@@ -36,10 +34,10 @@ type openAIClient struct {
 	maxResponseBytes int
 	excludeReasoning bool
 	reasoningEffort  string
-	reporter         Reporter
+	reporter         agent.Reporter
 }
 
-func newOpenAIClient(config OpenAIConfig) (*openAIClient, error) {
+func New(config Config) (*Client, error) {
 	if strings.TrimSpace(config.Model) == "" {
 		return nil, errors.New("model is required")
 	}
@@ -60,9 +58,9 @@ func newOpenAIClient(config OpenAIConfig) (*openAIClient, error) {
 	}
 	reporter := config.Reporter
 	if reporter == nil {
-		reporter = discardReporter{}
+		reporter = agent.NopReporter{}
 	}
-	return &openAIClient{
+	return &Client{
 		endpoint:         endpoint,
 		apiKey:           config.APIKey,
 		model:            config.Model,
@@ -75,7 +73,7 @@ func newOpenAIClient(config OpenAIConfig) (*openAIClient, error) {
 	}, nil
 }
 
-func (c *openAIClient) Complete(ctx context.Context, messages []message, tools []Tool) (message, tokenUsage, error) {
+func (c *Client) Complete(ctx context.Context, messages []agent.Message, tools []agent.Tool) (agent.Message, agent.TokenUsage, error) {
 	body := request{
 		Model:           c.model,
 		Messages:        messages,
@@ -121,7 +119,7 @@ func decodeCompletion(reader io.Reader, statusCode, limit int) (message, tokenUs
 		return message{}, tokenUsage{}, err
 	}
 	if len(body) > limit {
-		return message{}, tokenUsage{}, fmt.Errorf("model response exceeded %s limit", byteCount(limit))
+		return message{}, tokenUsage{}, fmt.Errorf("%w (%s)", errResponseLimit, byteCount(limit))
 	}
 	var decoded response
 	if err := json.Unmarshal(body, &decoded); err != nil {

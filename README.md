@@ -2,7 +2,12 @@
 
 A small, read-only Go CLI that asks an OpenAI-compatible model to review a Git branch. The model can inspect the repository through four bounded tools—`stat`, `glob`, `grep`, and `read`—all implemented against immutable Git objects with [`go-git`](https://github.com/go-git/go-git). The program does not invoke Git, a shell, or any other subprocess.
 
-The model must finish through a validated `submit_review` tool. Every finding has a `critical`, `high`, `medium`, or `low` severity, a summary of at most 12 words, a detailed explanation, and an exact file and line. An empty submission renders an explicit “No findings” result.
+The model must finish through a validated `submit_review` tool. Every submission
+includes a summary of the changes, strengths, weaknesses, and structured
+findings. Every finding has a `critical`, `high`, `medium`, or `low` severity, a
+summary of at most 12 words, a detailed explanation, and an exact file and line.
+Even when there are no findings, the review still explains what changed and
+what the implementation does well or could improve.
 
 ## Philosophy
 
@@ -126,11 +131,24 @@ The CLI defaults to `--reasoning-effort medium`. It does not set a completion-to
 ./git-review feature/my-change --reasoning-effort high
 ```
 
-If a provider still truncates a response at its own limit, the command does not retry or fail the process. It prints an explicitly inconclusive review and exits successfully so CI infrastructure remains healthy without falsely reporting a clean review. Token usage and cost from the truncated attempt are retained when the provider reports them.
+Limits are treated as feedback, not surprise failures. If a provider truncates
+a response or a turn reaches `--max-response-mib`, the model gets one bounded
+recovery turn telling it to stop inspecting and submit a concise review. The
+retry uses the same configured limits; the command never silently raises a
+ceiling. Usage and cost from both attempts are retained when reported.
 
-The same rule applies when the overall `--timeout` expires: the result is
+The overall `--timeout` reserves up to its final minute for submission. If a
+long model turn consumes the inspection portion of that budget, it is stopped
+before the hard deadline and the remaining time is used to tell the model to
+submit immediately. If that recovery also exhausts the deadline, the result is
 explicitly inconclusive and exits successfully. Other API, network, repository,
 and validation errors still produce a non-zero exit.
+
+The model is warned when only two turns remain and is explicitly required to
+call `submit_review` on the final turn. If it still does not produce a valid
+submission within `--max-steps`, the command returns a structured inconclusive
+review with the accumulated time, token, and cost statistics instead of failing
+the process or pretending the review was clean.
 
 Responses are streamed by default. This keeps long model turns active and lets `-v` report when OpenRouter is still processing or response chunks have started arriving. The configurable overall `--timeout` governs the entire review; there is no shorter per-request deadline. Use `--stream=false` for an endpoint that does not support Chat Completions streaming.
 
@@ -160,3 +178,14 @@ OPENAI_MODEL=my-tool-capable-model \
 - No subprocess API is used anywhere in the application.
 
 The process still needs network access to the configured model endpoint and read access to the repository's `.git` object database. In CI, pin the built binary and dependencies, use a read-only checkout, and scope the API credential to the model service.
+
+## Code organization
+
+The root package contains only command-line parsing and application wiring. The
+implementation is split into small internal packages with one responsibility:
+
+- `internal/agent` defines the model messages, tools, usage, and reporting contracts.
+- `internal/gitrepo` exposes bounded read-only operations over Git objects.
+- `internal/openai` implements the OpenAI-compatible Chat Completions transport.
+- `internal/review` owns the review loop, limits, instructions, validation, and output formats.
+- `internal/report` renders verbose logs and interactive progress.

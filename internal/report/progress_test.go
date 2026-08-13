@@ -1,4 +1,4 @@
-package main
+package report
 
 import (
 	"bytes"
@@ -6,6 +6,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/piedshag/git-review/internal/agent"
 )
 
 func TestSpinnerRendersStatusAndClearsLine(t *testing.T) {
@@ -31,7 +33,7 @@ func TestSpinnerRendersStatusAndClearsLine(t *testing.T) {
 
 func TestVerboseLoggingTakesPrecedenceOverSpinner(t *testing.T) {
 	var output bytes.Buffer
-	reporter := newReporter(&output, true, false, true)
+	reporter := New(&output, true, false, true)
 	if _, ok := reporter.(*textReporter); !ok {
 		t.Fatalf("verbose mode should use text reporter, got %T", reporter)
 	}
@@ -43,14 +45,14 @@ func TestVerboseLoggingTakesPrecedenceOverSpinner(t *testing.T) {
 
 func TestReporterKeepsDebugOutputExplicit(t *testing.T) {
 	var verboseOutput bytes.Buffer
-	verbose := newReporter(&verboseOutput, true, false, false)
+	verbose := New(&verboseOutput, true, false, false)
 	verbose.Debug("model response: secret reasoning")
 	if verboseOutput.Len() != 0 {
 		t.Fatalf("verbose mode leaked debug output: %q", verboseOutput.String())
 	}
 
 	var debugOutput bytes.Buffer
-	debug := newReporter(&debugOutput, false, true, false)
+	debug := New(&debugOutput, false, true, false)
 	debug.Debug("model response: parsed response")
 	if !strings.Contains(debugOutput.String(), "parsed response") {
 		t.Fatalf("debug reporter omitted model output: %q", debugOutput.String())
@@ -58,17 +60,17 @@ func TestReporterKeepsDebugOutputExplicit(t *testing.T) {
 }
 
 func TestReporterIsSilentForNonInteractiveDefault(t *testing.T) {
-	reporter := newReporter(io.Discard, false, false, false)
-	if _, ok := reporter.(discardReporter); !ok {
+	reporter := New(io.Discard, false, false, false)
+	if _, ok := reporter.(agent.NopReporter); !ok {
 		t.Fatalf("non-interactive default should be silent, got %T", reporter)
 	}
 }
 
 func TestSpinnerStreamStatusStaysCompact(t *testing.T) {
 	var output bytes.Buffer
-	reporter := newReporter(&output, false, false, true)
+	reporter := New(&output, false, false, true)
 	reporter.Next("Receiving streamed response")
-	reporter.Stream(streamStats{
+	reporter.Stream(agent.StreamStats{
 		Chunks: 323, RawBytes: 133 * 1024, ReasoningBytes: 12 * 1024,
 		LatestKind: "reasoning", Latest: strings.Repeat("gAAAA", 30),
 	}, time.Now().Add(-14*time.Second))

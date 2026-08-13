@@ -1,17 +1,30 @@
-package main
+package review
 
 import (
 	"context"
-	"net/http"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
 	"time"
 
+	"github.com/piedshag/git-review/internal/gitrepo"
+
 	git "github.com/go-git/go-git/v5"
 	"github.com/go-git/go-git/v5/plumbing"
 	"github.com/go-git/go-git/v5/plumbing/object"
 )
+
+const (
+	testChangeSummary = "The branch updates the review pipeline and its output behavior."
+	testStrengths     = "The implementation keeps responsibilities clear and behavior deterministic."
+	testWeaknesses    = "No material weaknesses were identified in the inspected changes."
+)
+
+func reviewArguments(findings string) string {
+	return fmt.Sprintf(`{"summary":%q,"strengths":%q,"weaknesses":%q,"findings":%s}`,
+		testChangeSummary, testStrengths, testWeaknesses, findings)
+}
 
 type completionFunc func(context.Context, []message, []Tool) (message, tokenUsage, error)
 
@@ -19,13 +32,7 @@ func (fn completionFunc) Complete(ctx context.Context, messages []message, tools
 	return fn(ctx, messages, tools)
 }
 
-type roundTripFunc func(*http.Request) (*http.Response, error)
-
-func (fn roundTripFunc) RoundTrip(request *http.Request) (*http.Response, error) {
-	return fn(request)
-}
-
-func makeSnapshot(t *testing.T) *Snapshot {
+func makeSnapshot(t *testing.T) *gitrepo.Snapshot {
 	t.Helper()
 	dir := t.TempDir()
 	repo, err := git.PlainInit(dir, false)
@@ -48,7 +55,7 @@ func makeSnapshot(t *testing.T) *Snapshot {
 			t.Fatal(err)
 		}
 	}
-	snapshot, err := Open(dir, "main", "feature")
+	snapshot, err := gitrepo.Open(dir, "main", "feature")
 	if err != nil {
 		t.Fatal(err)
 	}

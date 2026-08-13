@@ -1,4 +1,4 @@
-package main
+package gitrepo
 
 import (
 	"bufio"
@@ -11,6 +11,8 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+
+	"github.com/piedshag/git-review/internal/agent"
 
 	git "github.com/go-git/go-git/v5"
 	"github.com/go-git/go-git/v5/plumbing"
@@ -31,17 +33,6 @@ type Snapshot struct {
 	target     *object.Commit
 	baseName   string
 	targetName string
-}
-
-type Tool struct {
-	Type     string       `json:"type"`
-	Function ToolFunction `json:"function"`
-}
-
-type ToolFunction struct {
-	Name        string         `json:"name"`
-	Description string         `json:"description"`
-	Parameters  map[string]any `json:"parameters"`
 }
 
 func Open(repoPath, baseRevision, targetRevision string) (*Snapshot, error) {
@@ -108,25 +99,14 @@ func (s *Snapshot) Description() string {
 	return fmt.Sprintf("target %s (%s), base %s at merge-base (%s)", s.targetName, s.target.Hash, s.baseName, s.base.Hash)
 }
 
-func (s *Snapshot) Tools() []Tool {
+func (s *Snapshot) Tools() []agent.Tool {
 	refProperty := map[string]any{"type": "string", "enum": []string{"target", "base"}, "description": "Git snapshot to inspect; defaults to target"}
-	return []Tool{
-		{Type: "function", Function: ToolFunction{Name: "stat", Description: "List files changed between the merge-base and target, with status and line counts.", Parameters: objectSchema(nil, nil)}},
-		{Type: "function", Function: ToolFunction{Name: "glob", Description: "List repository paths matching a glob. Supports *, ?, and **.", Parameters: objectSchema(map[string]any{"pattern": map[string]any{"type": "string"}, "ref": refProperty}, []string{"pattern"})}},
-		{Type: "function", Function: ToolFunction{Name: "grep", Description: "Search text files in a Git snapshot with a Go regular expression.", Parameters: objectSchema(map[string]any{"pattern": map[string]any{"type": "string"}, "glob": map[string]any{"type": "string", "description": "Optional path glob"}, "ref": refProperty}, []string{"pattern"})}},
-		{Type: "function", Function: ToolFunction{Name: "read", Description: "Read numbered lines from a file stored in a Git snapshot. Use ref=base to inspect deleted or previous content.", Parameters: objectSchema(map[string]any{"path": map[string]any{"type": "string"}, "ref": refProperty, "start": map[string]any{"type": "integer", "minimum": 1}, "end": map[string]any{"type": "integer", "minimum": 1}}, []string{"path"})}},
+	return []agent.Tool{
+		{Type: "function", Function: agent.ToolFunction{Name: "stat", Description: "List files changed between the merge-base and target, with status and line counts.", Parameters: agent.ObjectSchema(nil, nil)}},
+		{Type: "function", Function: agent.ToolFunction{Name: "glob", Description: "List repository paths matching a glob. Supports *, ?, and **.", Parameters: agent.ObjectSchema(map[string]any{"pattern": map[string]any{"type": "string"}, "ref": refProperty}, []string{"pattern"})}},
+		{Type: "function", Function: agent.ToolFunction{Name: "grep", Description: "Search text files in a Git snapshot with a Go regular expression.", Parameters: agent.ObjectSchema(map[string]any{"pattern": map[string]any{"type": "string"}, "glob": map[string]any{"type": "string", "description": "Optional path glob"}, "ref": refProperty}, []string{"pattern"})}},
+		{Type: "function", Function: agent.ToolFunction{Name: "read", Description: "Read numbered lines from a file stored in a Git snapshot. Use ref=base to inspect deleted or previous content.", Parameters: agent.ObjectSchema(map[string]any{"path": map[string]any{"type": "string"}, "ref": refProperty, "start": map[string]any{"type": "integer", "minimum": 1}, "end": map[string]any{"type": "integer", "minimum": 1}}, []string{"path"})}},
 	}
-}
-
-func objectSchema(properties map[string]any, required []string) map[string]any {
-	if properties == nil {
-		properties = map[string]any{}
-	}
-	result := map[string]any{"type": "object", "properties": properties, "additionalProperties": false}
-	if len(required) > 0 {
-		result["required"] = required
-	}
-	return result
 }
 
 func (s *Snapshot) Call(name, rawArguments string) string {

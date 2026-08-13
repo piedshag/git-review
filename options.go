@@ -9,6 +9,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	reviewpkg "github.com/piedshag/git-review/internal/review"
 )
 
 const usage = `git-review reviews a Git branch with an OpenAI-compatible model.
@@ -41,7 +43,7 @@ type options struct {
 	maxResponseMiB   int
 	excludeReasoning bool
 	reasoningEffort  string
-	format           OutputFormat
+	format           reviewpkg.OutputFormat
 	instructions     string
 	instructionsFile string
 }
@@ -83,7 +85,7 @@ func parseOptions(arguments []string, output io.Writer) (options, error) {
 		fs.Usage()
 		return options{}, errors.New("exactly one branch is required")
 	}
-	format, err := parseOutputFormat(strings.ToLower(strings.TrimSpace(*formatName)))
+	format, err := reviewpkg.ParseOutputFormat(strings.ToLower(strings.TrimSpace(*formatName)))
 	if err != nil {
 		return options{}, err
 	}

@@ -6,6 +6,11 @@ import (
 	"flag"
 	"fmt"
 	"os"
+
+	"github.com/piedshag/git-review/internal/gitrepo"
+	"github.com/piedshag/git-review/internal/openai"
+	"github.com/piedshag/git-review/internal/report"
+	reviewpkg "github.com/piedshag/git-review/internal/review"
 )
 
 func main() {
@@ -23,16 +28,16 @@ func run() error {
 	if err != nil {
 		return err
 	}
-	instructions, err := loadInstructions(options.instructions, options.instructionsFile, os.Stdin)
+	instructions, err := reviewpkg.LoadInstructions(options.instructions, options.instructionsFile, os.Stdin)
 	if err != nil {
 		return err
 	}
-	snapshot, err := Open(options.repoPath, options.base, options.branch)
+	snapshot, err := gitrepo.Open(options.repoPath, options.base, options.branch)
 	if err != nil {
 		return err
 	}
-	reporter := newReporter(os.Stderr, options.verbose, options.debugModelOutput, terminalOutput(os.Stderr))
-	model, err := newOpenAIClient(OpenAIConfig{
+	reporter := report.New(os.Stderr, options.verbose, options.debugModelOutput, terminalOutput(os.Stderr))
+	model, err := openai.New(openai.Config{
 		Endpoint:         options.endpoint,
 		APIKey:           os.Getenv("OPENAI_API_KEY"),
 		Model:            options.model,
@@ -45,7 +50,7 @@ func run() error {
 	if err != nil {
 		return err
 	}
-	reviewer, err := newReviewer(ReviewerConfig{
+	reviewer, err := reviewpkg.New(reviewpkg.Config{
 		MaxSteps:     options.maxSteps,
 		Instructions: instructions,
 		InputPrice:   options.inputPrice,
@@ -62,5 +67,5 @@ func run() error {
 	if err != nil {
 		return err
 	}
-	return writeReview(os.Stdout, options.format, review)
+	return reviewpkg.Write(os.Stdout, options.format, review)
 }

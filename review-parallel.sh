@@ -186,5 +186,5 @@ fi
 printf '# Parallel review\n'
 for index in 0 1 2; do
 	printf '\n## %s\n' "${titles[$index]}"
-	sed -e '1{/^# Review$/d;}' -e 's/^## /### /' "$work_dir/${names[$index]}.markdown"
+	sed -e '1{/^# Review$/d;}' -e 's/^### /#### /' -e 's/^## /### /' "$work_dir/${names[$index]}.markdown"
 done
