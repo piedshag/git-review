@@ -1,4 +1,4 @@
-package main
+package review
 
 import (
 	"encoding/json"
@@ -13,7 +13,7 @@ const (
 	FormatJSON     OutputFormat = "json"
 )
 
-func parseOutputFormat(value string) (OutputFormat, error) {
+func ParseOutputFormat(value string) (OutputFormat, error) {
 	format := OutputFormat(value)
 	switch format {
 	case FormatMarkdown, FormatJSON:
@@ -23,7 +23,7 @@ func parseOutputFormat(value string) (OutputFormat, error) {
 	}
 }
 
-func writeReview(writer io.Writer, format OutputFormat, review Review) error {
+func Write(writer io.Writer, format OutputFormat, review Review) error {
 	review.Findings = sortedFindings(review.Findings)
 	switch format {
 	case FormatMarkdown:

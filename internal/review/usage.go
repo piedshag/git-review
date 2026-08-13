@@ -1,4 +1,4 @@
-package main
+package review
 
 import (
 	"fmt"
@@ -27,12 +27,12 @@ func newUsageTracker(inputPrice, outputPrice float64) *usageTracker {
 }
 
 func (u *usageTracker) Add(value tokenUsage) string {
-	if !value.reported() {
+	if !value.Reported() {
 		u.Missing()
 		return "provider did not report token usage"
 	}
 	u.usageSeen = true
-	u.total.add(value)
+	u.total.Add(value)
 	cost, available, estimated := u.cost(value)
 	if available {
 		u.totalCost += cost

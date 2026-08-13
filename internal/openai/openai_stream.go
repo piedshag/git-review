@@ -1,4 +1,4 @@
-package main
+package openai
 
 import (
 	"bufio"
@@ -13,7 +13,7 @@ import (
 )
 
 type streamDecoder struct {
-	client       *openAIClient
+	client       *Client
 	assembled    message
 	toolCalls    map[int]*toolCall
 	usage        tokenUsage
@@ -25,7 +25,7 @@ type streamDecoder struct {
 	finishReason string
 }
 
-func (c *openAIClient) decodeStream(reader io.Reader) (message, tokenUsage, error) {
+func (c *Client) decodeStream(reader io.Reader) (message, tokenUsage, error) {
 	decoder := &streamDecoder{
 		client:    c,
 		assembled: message{Role: "assistant"},
@@ -55,7 +55,7 @@ func (d *streamDecoder) read(reader *bufio.Reader) (bool, error) {
 		fragment, readErr := reader.ReadSlice('\n')
 		d.stats.RawBytes += len(fragment)
 		if d.stats.RawBytes > d.client.maxResponseBytes {
-			return false, fmt.Errorf("streamed model response exceeded %s limit; increase --max-response-mib if this is expected", byteCount(d.client.maxResponseBytes))
+			return false, fmt.Errorf("%w (%s); increase --max-response-mib if this is expected", errResponseLimit, byteCount(d.client.maxResponseBytes))
 		}
 		line = append(line, fragment...)
 		if errors.Is(readErr, bufio.ErrBufferFull) {
@@ -125,7 +125,7 @@ func (d *streamDecoder) apply(chunk streamChunk) error {
 	if chunk.Error != nil {
 		return errors.New(chunk.Error.Message)
 	}
-	if chunk.Usage.reported() {
+	if chunk.Usage.Reported() {
 		d.usage = chunk.Usage
 	}
 	for _, choice := range chunk.Choices {

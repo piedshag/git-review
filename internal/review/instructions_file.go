@@ -1,4 +1,4 @@
-package main
+package review
 
 import (
 	"errors"
@@ -10,7 +10,7 @@ import (
 
 const maxInstructionsBytes = 1024 * 1024
 
-func loadInstructions(inline, filename string, stdin io.Reader) (string, error) {
+func LoadInstructions(inline, filename string, stdin io.Reader) (string, error) {
 	if strings.TrimSpace(filename) == "" {
 		return strings.TrimSpace(inline), nil
 	}
