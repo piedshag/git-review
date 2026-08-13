@@ -187,6 +187,7 @@ func describeToolCall(call toolCall) string {
 		Ref     string `json:"ref"`
 		Start   int    `json:"start"`
 		End     int    `json:"end"`
+		Context *int   `json:"context"`
 	}
 	if err := json.Unmarshal([]byte(call.Function.Arguments), &args); err != nil {
 		return fmt.Sprintf("Using %q with invalid arguments", call.Function.Name)
@@ -198,6 +199,15 @@ func describeToolCall(call toolCall) string {
 	switch call.Function.Name {
 	case "stat":
 		return "Inspecting changed-file statistics"
+	case "diff":
+		context := 3
+		if args.Context != nil {
+			context = *args.Context
+		}
+		if args.Path == "" {
+			return fmt.Sprintf("Inspecting all changes (%d context lines)", context)
+		}
+		return fmt.Sprintf("Inspecting changes to %q (%d context lines)", args.Path, context)
 	case "glob":
 		return fmt.Sprintf("Listing %q in %s", args.Pattern, ref)
 	case "grep":

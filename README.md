@@ -1,6 +1,6 @@
 # git-review
 
-A small, read-only Go CLI that asks an OpenAI-compatible model to review a Git branch. The model can inspect the repository through four bounded tools—`stat`, `glob`, `grep`, and `read`—all implemented against immutable Git objects with [`go-git`](https://github.com/go-git/go-git). The program does not invoke Git, a shell, or any other subprocess.
+A small, read-only Go CLI that asks an OpenAI-compatible model to review a Git branch. The model can inspect the repository through five bounded tools—`stat`, `diff`, `glob`, `grep`, and `read`—all implemented against immutable Git objects with [`go-git`](https://github.com/go-git/go-git). The program does not invoke Git, a shell, or any other subprocess.
 
 The model must finish through a validated `submit_review` tool. Every submission
 includes a summary of the changes, strengths, weaknesses, and structured
@@ -23,7 +23,7 @@ name, review policy can come from a flag, file, stdin, or environment variable,
 and exit behavior is suitable for CI pipelines.
 
 The model receives capabilities, not general machine access. Its only repository
-operations are the fixed `stat`, `glob`, `grep`, and `read` tools. These tools use
+operations are the fixed `stat`, `diff`, `glob`, `grep`, and `read` tools. These tools use
 `go-git` to read immutable base and target commit objects; they do not read the
 checked-out worktree and cannot address arbitrary revisions. The model is never
 given a shell, a command-execution tool, filesystem APIs, network tools, or a way
@@ -173,7 +173,7 @@ OPENAI_MODEL=my-tool-capable-model \
 ## Security model
 
 - Repository content comes from commit trees and blobs, not the checked-out filesystem.
-- The model chooses only among four fixed, read-only repository functions plus the validated terminal `submit_review` function. It cannot provide commands or arbitrary revisions.
+- The model chooses only among five fixed, read-only repository functions plus the validated terminal `submit_review` function. It cannot provide commands or arbitrary revisions.
 - Reads, search results, payloads, tool turns, and review duration are bounded.
 - No subprocess API is used anywhere in the application.
 
