@@ -144,7 +144,7 @@ submit immediately. If that recovery also exhausts the deadline, the result is
 explicitly inconclusive and exits successfully. Other API, network, repository,
 and validation errors still produce a non-zero exit.
 
-The model is warned when only two turns remain and is explicitly required to
+Reviews allow 30 model/tool turns by default. The model is warned when only two turns remain and is explicitly required to
 call `submit_review` on the final turn. If it still does not produce a valid
 submission within `--max-steps`, the command returns a structured inconclusive
 review with the accumulated time, token, and cost statistics instead of failing
