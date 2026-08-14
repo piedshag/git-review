@@ -69,3 +69,14 @@ func TestParseOptionsSupportsFormatAndInstructionsAfterBranch(t *testing.T) {
 		t.Fatalf("unexpected options: %+v", options)
 	}
 }
+
+func TestParseOptionsDefaultsToThirtySteps(t *testing.T) {
+	t.Setenv("GIT_REVIEW_MAX_STEPS", "")
+	options, err := parseOptions([]string{"feature"}, io.Discard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if options.maxSteps != 30 {
+		t.Fatalf("max steps=%d, want 30", options.maxSteps)
+	}
+}

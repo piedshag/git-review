@@ -17,7 +17,7 @@ func TestReviewerExecutesToolsAndReturnsStructuredReview(t *testing.T) {
 	var calls atomic.Int32
 	var logs bytes.Buffer
 	model := completionFunc(func(_ context.Context, messages []message, tools []Tool) (message, tokenUsage, error) {
-		if len(tools) != 5 {
+		if len(tools) != 6 {
 			t.Fatalf("got %d tools", len(tools))
 		}
 		if calls.Add(1) == 1 {
@@ -284,11 +284,15 @@ func TestReviewerReturnsInconclusiveReviewWhenDeadlineExpires(t *testing.T) {
 func TestDescribeToolCallIncludesArgumentsAndRef(t *testing.T) {
 	grep := describeToolCall(toolCall{Function: functionCall{Name: "grep", Arguments: `{"pattern":"TODO","glob":"**/*.go","ref":"base"}`}})
 	read := describeToolCall(toolCall{Function: functionCall{Name: "read", Arguments: `{"path":"main.go","ref":"base","start":10,"end":20}`}})
+	diff := describeToolCall(toolCall{Function: functionCall{Name: "diff", Arguments: `{"path":"main.go","context":5}`}})
 	if grep != `Grepping base files matching "**/*.go" for "TODO"` {
 		t.Fatalf("unexpected grep activity: %q", grep)
 	}
 	if read != `Reading "main.go" from base (lines 10-20)` {
 		t.Fatalf("unexpected read activity: %q", read)
+	}
+	if diff != `Inspecting changes to "main.go" (5 context lines)` {
+		t.Fatalf("unexpected diff activity: %q", diff)
 	}
 }
 

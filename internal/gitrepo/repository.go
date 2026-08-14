@@ -16,6 +16,7 @@ import (
 
 	git "github.com/go-git/go-git/v5"
 	"github.com/go-git/go-git/v5/plumbing"
+	fdiff "github.com/go-git/go-git/v5/plumbing/format/diff"
 	"github.com/go-git/go-git/v5/plumbing/object"
 )
 
@@ -103,6 +104,7 @@ func (s *Snapshot) Tools() []agent.Tool {
 	refProperty := map[string]any{"type": "string", "enum": []string{"target", "base"}, "description": "Git snapshot to inspect; defaults to target"}
 	return []agent.Tool{
 		{Type: "function", Function: agent.ToolFunction{Name: "stat", Description: "List files changed between the merge-base and target, with status and line counts.", Parameters: agent.ObjectSchema(nil, nil)}},
+		{Type: "function", Function: agent.ToolFunction{Name: "diff", Description: "Show unified base-to-target diff hunks with target line numbers. Optionally restrict to one changed path.", Parameters: agent.ObjectSchema(map[string]any{"path": map[string]any{"type": "string", "description": "Optional repository-relative changed file path"}, "context": map[string]any{"type": "integer", "minimum": 1, "maximum": 20, "description": "Unchanged lines around each hunk; defaults to 3"}}, nil)}},
 		{Type: "function", Function: agent.ToolFunction{Name: "glob", Description: "List repository paths matching a glob. Supports *, ?, and **.", Parameters: agent.ObjectSchema(map[string]any{"pattern": map[string]any{"type": "string"}, "ref": refProperty}, []string{"pattern"})}},
 		{Type: "function", Function: agent.ToolFunction{Name: "grep", Description: "Search text files in a Git snapshot with a Go regular expression.", Parameters: agent.ObjectSchema(map[string]any{"pattern": map[string]any{"type": "string"}, "glob": map[string]any{"type": "string", "description": "Optional path glob"}, "ref": refProperty}, []string{"pattern"})}},
 		{Type: "function", Function: agent.ToolFunction{Name: "read", Description: "Read numbered lines from a file stored in a Git snapshot. Use ref=base to inspect deleted or previous content.", Parameters: agent.ObjectSchema(map[string]any{"path": map[string]any{"type": "string"}, "ref": refProperty, "start": map[string]any{"type": "integer", "minimum": 1}, "end": map[string]any{"type": "integer", "minimum": 1}}, []string{"path"})}},
@@ -117,6 +119,7 @@ func (s *Snapshot) Call(name, rawArguments string) string {
 		Ref     string `json:"ref"`
 		Start   int    `json:"start"`
 		End     int    `json:"end"`
+		Context *int   `json:"context"`
 	}
 	if err := json.Unmarshal([]byte(rawArguments), &args); err != nil {
 		return "error: invalid arguments: " + err.Error()
@@ -126,6 +129,8 @@ func (s *Snapshot) Call(name, rawArguments string) string {
 	switch name {
 	case "stat":
 		output, err = s.stat()
+	case "diff":
+		output, err = s.diff(args.Path, args.Context)
 	case "glob":
 		output, err = s.glob(args.Pattern, args.Ref)
 	case "grep":
@@ -139,6 +144,55 @@ func (s *Snapshot) Call(name, rawArguments string) string {
 		return "error: " + err.Error()
 	}
 	return truncate(output, maxToolOutput)
+}
+
+type selectedPatch struct {
+	files []fdiff.FilePatch
+}
+
+func (p selectedPatch) FilePatches() []fdiff.FilePatch { return p.files }
+func (selectedPatch) Message() string                  { return "" }
+
+func (s *Snapshot) diff(name string, contextLines *int) (string, error) {
+	context := fdiff.DefaultContextLines
+	if contextLines != nil {
+		context = *contextLines
+	}
+	if context < 1 || context > 20 {
+		return "", errors.New("context must be between 1 and 20")
+	}
+	clean := ""
+	if name != "" {
+		clean = path.Clean(name)
+		if clean == "." || clean == ".." || strings.HasPrefix(clean, "../") || path.IsAbs(clean) {
+			return "", errors.New("path must be a repository-relative file path")
+		}
+	}
+	patch, err := s.base.Patch(s.target)
+	if err != nil {
+		return "", err
+	}
+	files := patch.FilePatches()
+	if clean != "" {
+		files = nil
+		for _, filePatch := range patch.FilePatches() {
+			from, to := filePatch.Files()
+			if (from != nil && from.Path() == clean) || (to != nil && to.Path() == clean) {
+				files = append(files, filePatch)
+			}
+		}
+	}
+	if len(files) == 0 {
+		if clean == "" {
+			return "No changes.", nil
+		}
+		return fmt.Sprintf("No changes for %q.", clean), nil
+	}
+	var output strings.Builder
+	if err := fdiff.NewUnifiedEncoder(&output, context).Encode(selectedPatch{files: files}); err != nil {
+		return "", fmt.Errorf("encode diff: %w", err)
+	}
+	return output.String(), nil
 }
 
 func (s *Snapshot) commit(ref string) (*object.Commit, error) {

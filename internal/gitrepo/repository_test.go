@@ -63,6 +63,19 @@ func TestSnapshotToolsUseCommitsAndMergeBase(t *testing.T) {
 	if strings.Contains(stats, "main-only.txt") {
 		t.Fatalf("stats included a base-only change:\n%s", stats)
 	}
+	diff := snapshot.Call("diff", `{"path":"root.go","context":1}`)
+	if !strings.Contains(diff, "diff --git a/root.go b/root.go") ||
+		!strings.Contains(diff, "@@ -2,2 +2,2 @@") ||
+		!strings.Contains(diff, "+func Value() int { return 2 }") {
+		t.Fatalf("unexpected path diff:\n%s", diff)
+	}
+	if strings.Contains(diff, "pkg/new.go") {
+		t.Fatalf("path diff included another file:\n%s", diff)
+	}
+	allDiff := snapshot.Call("diff", `{}`)
+	if !strings.Contains(allDiff, "root.go") || !strings.Contains(allDiff, "pkg/new.go") {
+		t.Fatalf("complete diff omitted changed files:\n%s", allDiff)
+	}
 
 	paths := snapshot.Call("glob", `{"pattern":"**/*.go"}`)
 	if !strings.Contains(paths, "root.go") || !strings.Contains(paths, "pkg/new.go") {
@@ -87,6 +100,23 @@ func TestReadRejectsPathsOutsideRepository(t *testing.T) {
 	result := snapshot.Call("read", `{"path":"../secret"}`)
 	if !strings.Contains(result, "repository-relative") {
 		t.Fatalf("expected path rejection, got %q", result)
+	}
+}
+
+func TestDiffValidatesArguments(t *testing.T) {
+	snapshot := testSnapshot(t)
+	for _, arguments := range []string{
+		`{"path":"../secret"}`,
+		`{"context":21}`,
+		`{"context":0}`,
+	} {
+		result := snapshot.Call("diff", arguments)
+		if !strings.HasPrefix(result, "error:") {
+			t.Errorf("diff accepted %s: %q", arguments, result)
+		}
+	}
+	if result := snapshot.Call("diff", `{"path":"missing.go"}`); result != `No changes for "missing.go".` {
+		t.Fatalf("unexpected missing-path response: %q", result)
 	}
 }
 

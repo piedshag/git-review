@@ -13,6 +13,8 @@ import (
 	reviewpkg "github.com/piedshag/git-review/internal/review"
 )
 
+const defaultMaxSteps = 30
+
 const usage = `git-review reviews a Git branch with an OpenAI-compatible model.
 
 Usage:
@@ -55,7 +57,7 @@ func parseOptions(arguments []string, output io.Writer) (options, error) {
 	base := fs.String("base", "", "base branch or revision (auto-detected when omitted)")
 	model := fs.String("model", env("OPENAI_MODEL", "gpt-5"), "model name")
 	endpoint := fs.String("endpoint", env("OPENAI_BASE_URL", "https://api.openai.com/v1"), "OpenAI-compatible API base URL")
-	maxSteps := fs.Int("max-steps", envInt("GIT_REVIEW_MAX_STEPS", 20), "maximum model/tool turns")
+	maxSteps := fs.Int("max-steps", envInt("GIT_REVIEW_MAX_STEPS", defaultMaxSteps), "maximum model/tool turns")
 	timeout := fs.Duration("timeout", 10*time.Minute, "overall review timeout")
 	verbose := fs.Bool("v", false, "log review activity and token usage to stderr")
 	debugModelOutput := fs.Bool("debug-model-output", false, "log complete parsed model responses to stderr")
