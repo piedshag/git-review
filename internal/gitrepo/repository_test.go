@@ -1,6 +1,7 @@
 package gitrepo
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"strings"
@@ -56,14 +57,21 @@ func TestSnapshotToolsUseCommitsAndMergeBase(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	stats := snapshot.Call("stat", `{}`)
+	stats, err := snapshot.Stat(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
 	if !strings.Contains(stats, "root.go") || !strings.Contains(stats, "pkg/new.go") {
 		t.Fatalf("missing changed files in stats:\n%s", stats)
 	}
 	if strings.Contains(stats, "main-only.txt") {
 		t.Fatalf("stats included a base-only change:\n%s", stats)
 	}
-	diff := snapshot.Call("diff", `{"path":"root.go","context":1}`)
+	contextLines := 1
+	diff, err := snapshot.Diff(context.Background(), "root.go", &contextLines)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if !strings.Contains(diff, "diff --git a/root.go b/root.go") ||
 		!strings.Contains(diff, "@@ -2,2 +2,2 @@") ||
 		!strings.Contains(diff, "+func Value() int { return 2 }") {
@@ -72,24 +80,39 @@ func TestSnapshotToolsUseCommitsAndMergeBase(t *testing.T) {
 	if strings.Contains(diff, "pkg/new.go") {
 		t.Fatalf("path diff included another file:\n%s", diff)
 	}
-	allDiff := snapshot.Call("diff", `{}`)
+	allDiff, err := snapshot.Diff(context.Background(), "", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if !strings.Contains(allDiff, "root.go") || !strings.Contains(allDiff, "pkg/new.go") {
 		t.Fatalf("complete diff omitted changed files:\n%s", allDiff)
 	}
 
-	paths := snapshot.Call("glob", `{"pattern":"**/*.go"}`)
+	paths, err := snapshot.Glob(context.Background(), "**/*.go", "")
+	if err != nil {
+		t.Fatal(err)
+	}
 	if !strings.Contains(paths, "root.go") || !strings.Contains(paths, "pkg/new.go") {
 		t.Fatalf("recursive glob did not match root and nested files:\n%s", paths)
 	}
-	matches := snapshot.Call("grep", `{"pattern":"return 2","glob":"*.go"}`)
+	matches, err := snapshot.Grep(context.Background(), "return 2", "*.go", "")
+	if err != nil {
+		t.Fatal(err)
+	}
 	if !strings.Contains(matches, "root.go:3:func Value() int { return 2 }") {
 		t.Fatalf("unexpected grep output: %s", matches)
 	}
-	read := snapshot.Call("read", `{"path":"root.go","start":3,"end":3}`)
+	read, err := snapshot.Read(context.Background(), "root.go", "", 3, 3)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if !strings.Contains(read, "3\tfunc Value() int { return 2 }") {
 		t.Fatalf("unexpected read output: %s", read)
 	}
-	baseRead := snapshot.Call("read", `{"path":"root.go","ref":"base","start":3,"end":3}`)
+	baseRead, err := snapshot.Read(context.Background(), "root.go", "base", 3, 3)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if !strings.Contains(baseRead, "return 1") {
 		t.Fatalf("read did not select base snapshot: %s", baseRead)
 	}
@@ -97,25 +120,28 @@ func TestSnapshotToolsUseCommitsAndMergeBase(t *testing.T) {
 
 func TestReadRejectsPathsOutsideRepository(t *testing.T) {
 	snapshot := testSnapshot(t)
-	result := snapshot.Call("read", `{"path":"../secret"}`)
-	if !strings.Contains(result, "repository-relative") {
-		t.Fatalf("expected path rejection, got %q", result)
+	_, err := snapshot.Read(context.Background(), "../secret", "", 0, 0)
+	if err == nil || !strings.Contains(err.Error(), "repository-relative") {
+		t.Fatalf("expected path rejection, got %v", err)
 	}
 }
 
 func TestDiffValidatesArguments(t *testing.T) {
 	snapshot := testSnapshot(t)
-	for _, arguments := range []string{
-		`{"path":"../secret"}`,
-		`{"context":21}`,
-		`{"context":0}`,
+	zero, twentyOne := 0, 21
+	for _, test := range []struct {
+		path    string
+		context *int
+	}{
+		{path: "../secret"},
+		{context: &twentyOne},
+		{context: &zero},
 	} {
-		result := snapshot.Call("diff", arguments)
-		if !strings.HasPrefix(result, "error:") {
-			t.Errorf("diff accepted %s: %q", arguments, result)
+		if _, err := snapshot.Diff(context.Background(), test.path, test.context); err == nil {
+			t.Errorf("diff accepted path=%q context=%v", test.path, test.context)
 		}
 	}
-	if result := snapshot.Call("diff", `{"path":"missing.go"}`); result != `No changes for "missing.go".` {
+	if result, err := snapshot.Diff(context.Background(), "missing.go", nil); err != nil || result != `No changes for "missing.go".` {
 		t.Fatalf("unexpected missing-path response: %q", result)
 	}
 }

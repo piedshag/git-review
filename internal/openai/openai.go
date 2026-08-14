@@ -12,6 +12,7 @@ import (
 	"strings"
 
 	"github.com/piedshag/git-review/internal/agent"
+	"github.com/piedshag/git-review/internal/toolset"
 )
 
 type Config struct {
@@ -73,11 +74,11 @@ func New(config Config) (*Client, error) {
 	}, nil
 }
 
-func (c *Client) Complete(ctx context.Context, messages []agent.Message, tools []agent.Tool) (agent.Message, agent.TokenUsage, error) {
+func (c *Client) Complete(ctx context.Context, messages []agent.Message, tools []toolset.Definition) (agent.Message, agent.TokenUsage, error) {
 	body := request{
 		Model:           c.model,
 		Messages:        messages,
-		Tools:           tools,
+		Tools:           wireTools(tools),
 		Stream:          c.stream,
 		ReasoningEffort: c.reasoningEffort,
 	}

@@ -8,9 +8,12 @@ import (
 	"os"
 
 	"github.com/piedshag/git-review/internal/gitrepo"
+	"github.com/piedshag/git-review/internal/gittools"
+	"github.com/piedshag/git-review/internal/mcpserver"
 	"github.com/piedshag/git-review/internal/openai"
 	"github.com/piedshag/git-review/internal/report"
 	reviewpkg "github.com/piedshag/git-review/internal/review"
+	"github.com/piedshag/git-review/internal/toolset"
 )
 
 func main() {
@@ -21,7 +24,15 @@ func main() {
 }
 
 func run() error {
-	options, err := parseOptions(os.Args[1:], os.Stderr)
+	arguments := os.Args[1:]
+	if len(arguments) > 0 && arguments[0] == "mcp" {
+		return runMCP(arguments[1:])
+	}
+	return runReview(arguments)
+}
+
+func runReview(arguments []string) error {
+	options, err := parseOptions(arguments, os.Stderr)
 	if errors.Is(err, flag.ErrHelp) {
 		return nil
 	}
@@ -32,7 +43,7 @@ func run() error {
 	if err != nil {
 		return err
 	}
-	snapshot, err := gitrepo.Open(options.repoPath, options.base, options.branch)
+	snapshot, tools, err := reviewTools(options.repoPath, options.base, options.branch)
 	if err != nil {
 		return err
 	}
@@ -56,7 +67,7 @@ func run() error {
 		InputPrice:   options.inputPrice,
 		OutputPrice:  options.outputPrice,
 		Reporter:     reporter,
-	}, snapshot, model)
+	}, snapshot.Description(), tools, model)
 	if err != nil {
 		return err
 	}
@@ -68,4 +79,39 @@ func run() error {
 		return err
 	}
 	return reviewpkg.Write(os.Stdout, options.format, review)
+}
+
+func runMCP(arguments []string) error {
+	options, err := parseMCPOptions(arguments, os.Stderr)
+	if errors.Is(err, flag.ErrHelp) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	_, tools, err := reviewTools(options.repoPath, options.base, options.branch)
+	if err != nil {
+		return err
+	}
+	return mcpserver.RunStdio(context.Background(), tools)
+}
+
+func reviewTools(repoPath, base, branch string) (*gitrepo.Snapshot, *toolset.Registry, error) {
+	snapshot, err := gitrepo.Open(repoPath, base, branch)
+	if err != nil {
+		return nil, nil, err
+	}
+	gitSet, err := gittools.New(snapshot)
+	if err != nil {
+		return nil, nil, err
+	}
+	submissionSet, err := reviewpkg.SubmissionTools()
+	if err != nil {
+		return nil, nil, err
+	}
+	tools, err := toolset.Combine(gitSet, submissionSet)
+	if err != nil {
+		return nil, nil, err
+	}
+	return snapshot, tools, nil
 }

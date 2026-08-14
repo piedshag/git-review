@@ -9,7 +9,7 @@ import (
 	"time"
 
 	"github.com/piedshag/git-review/internal/agent"
-	"github.com/piedshag/git-review/internal/gitrepo"
+	"github.com/piedshag/git-review/internal/toolset"
 )
 
 type Config struct {
@@ -22,8 +22,9 @@ type Config struct {
 
 type Reviewer struct {
 	model        agent.CompletionClient
-	repo         *gitrepo.Snapshot
-	tools        []Tool
+	target       string
+	tools        toolset.Set
+	definitions  []toolset.Definition
 	maxSteps     int
 	instructions string
 	inputPrice   float64
@@ -31,9 +32,12 @@ type Reviewer struct {
 	reporter     agent.Reporter
 }
 
-func New(config Config, repo *gitrepo.Snapshot, model agent.CompletionClient) (*Reviewer, error) {
-	if repo == nil {
-		return nil, errors.New("repository snapshot is required")
+func New(config Config, target string, tools toolset.Set, model agent.CompletionClient) (*Reviewer, error) {
+	if strings.TrimSpace(target) == "" {
+		return nil, errors.New("review target description is required")
+	}
+	if tools == nil {
+		return nil, errors.New("tool set is required")
 	}
 	if model == nil {
 		return nil, errors.New("model client is required")
@@ -45,12 +49,11 @@ func New(config Config, repo *gitrepo.Snapshot, model agent.CompletionClient) (*
 	if reporter == nil {
 		reporter = agent.NopReporter{}
 	}
-	tools := append([]Tool(nil), repo.Tools()...)
-	tools = append(tools, submitReviewTool())
 	return &Reviewer{
 		model:        model,
-		repo:         repo,
+		target:       target,
 		tools:        tools,
+		definitions:  tools.Definitions(),
 		maxSteps:     config.MaxSteps,
 		instructions: reviewInstructions(config.Instructions),
 		inputPrice:   config.InputPrice,
@@ -65,10 +68,10 @@ func (r *Reviewer) Review(ctx context.Context) (Review, error) {
 	defer r.reporter.Close()
 	messages := []message{
 		{Role: "system", Content: r.instructions},
-		{Role: "user", Content: "Review " + r.repo.Description() + "."},
+		{Role: "user", Content: "Review " + r.target + "."},
 	}
 	usage := newUsageTracker(r.inputPrice, r.outputPrice)
-	r.reporter.Next("reviewing %s", r.repo.Description())
+	r.reporter.Next("reviewing %s", r.target)
 
 	for step := 1; step <= r.maxSteps; step++ {
 		turnContext, cancelTurn, notice := limits.BeginTurn(ctx, step)
@@ -77,7 +80,7 @@ func (r *Reviewer) Review(ctx context.Context) (Review, error) {
 			messages = append(messages, message{Role: "user", Content: notice.feedback})
 		}
 		r.reporter.Next("thinking (step %d)...", step)
-		assistant, turnUsage, err := r.model.Complete(turnContext, messages, r.tools)
+		assistant, turnUsage, err := r.model.Complete(turnContext, messages, r.definitions)
 		cancelTurn()
 		if err != nil {
 			decision := limits.HandleError(ctx, step, err)
@@ -103,14 +106,9 @@ func (r *Reviewer) Review(ctx context.Context) (Review, error) {
 			messages = append(messages, message{Role: "user", Content: "Complete the review by calling submit_review. Free-form final text is not accepted."})
 			continue
 		}
-		if arguments, call, ok := reviewSubmission(assistant.ToolCalls); ok {
-			r.reportToolCall(call)
-			submission, submissionErr := parseReviewSubmission(arguments)
-			if submissionErr != nil {
-				r.reporter.Next("review submission rejected: %v", submissionErr)
-				messages = append(messages, message{Role: "tool", ToolCallID: call.ID, Content: "error: invalid review submission: " + submissionErr.Error()})
-				continue
-			}
+		var submission *Submission
+		messages, submission = r.runTools(ctx, messages, assistant.ToolCalls)
+		if submission != nil {
 			duration := time.Since(started)
 			r.reporter.Next("%s", usage.Summary("review complete", duration))
 			r.reporter.Finish()
@@ -119,7 +117,6 @@ func (r *Reviewer) Review(ctx context.Context) (Review, error) {
 				Weaknesses: submission.Weaknesses, Findings: submission.Findings, Stats: usage.Stats(duration),
 			}, nil
 		}
-		messages = r.runTools(messages, assistant.ToolCalls)
 	}
 	decision := limits.Exhausted()
 	duration := time.Since(started)
@@ -136,25 +133,32 @@ func (r *Reviewer) finishInconclusive(usage *usageTracker, step int, turnUsage t
 	return inconclusiveReview(message, usage.Stats(duration))
 }
 
-func reviewSubmission(calls []toolCall) (string, toolCall, bool) {
-	if len(calls) != 1 || calls[0].Function.Name != submitReviewToolName {
-		return "", toolCall{}, false
-	}
-	return calls[0].Function.Arguments, calls[0], true
-}
-
-func (r *Reviewer) runTools(messages []message, calls []toolCall) []message {
+func (r *Reviewer) runTools(ctx context.Context, messages []message, calls []toolCall) ([]message, *Submission) {
 	for _, call := range calls {
 		r.reportToolCall(call)
-		result := ""
-		if call.Function.Name == submitReviewToolName {
-			result = "error: submit_review must be called exactly once and by itself"
-		} else {
-			result = r.repo.Call(call.Function.Name, call.Function.Arguments)
+		if call.Function.Name == submitReviewToolName && len(calls) != 1 {
+			messages = append(messages, message{Role: "tool", ToolCallID: call.ID, Content: "error: submit_review must be called exactly once and by itself"})
+			continue
 		}
-		messages = append(messages, message{Role: "tool", ToolCallID: call.ID, Content: result})
+		result, err := r.tools.Call(ctx, call.Function.Name, json.RawMessage(call.Function.Arguments))
+		if err != nil {
+			if call.Function.Name == submitReviewToolName {
+				r.reporter.Next("review submission rejected: %v", err)
+			}
+			messages = append(messages, message{Role: "tool", ToolCallID: call.ID, Content: "error: " + err.Error()})
+			continue
+		}
+		if result.Final {
+			submission, ok := result.Structured.(Submission)
+			if !ok {
+				messages = append(messages, message{Role: "tool", ToolCallID: call.ID, Content: "error: final tool returned an unsupported result"})
+				continue
+			}
+			return messages, &submission
+		}
+		messages = append(messages, message{Role: "tool", ToolCallID: call.ID, Content: result.Text})
 	}
-	return messages
+	return messages, nil
 }
 
 func (r *Reviewer) recordUsage(usage *usageTracker, step int, value tokenUsage) {

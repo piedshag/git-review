@@ -33,7 +33,7 @@ func TestReviewerExecutesToolsAndReturnsStructuredReview(t *testing.T) {
 		return message{Role: "assistant", ToolCalls: []toolCall{{ID: "submit", Type: "function", Function: functionCall{Name: submitReviewToolName, Arguments: reviewArguments(`[]`)}}}}, tokenUsage{PromptTokens: 200, CompletionTokens: 20, TotalTokens: 220, Cost: floatPointer(0.002)}, nil
 	})
 	reporter := reportpkg.New(&logs, true, false, false)
-	reviewer, err := New(Config{MaxSteps: 3, Reporter: reporter}, makeSnapshot(t), model)
+	reviewer, err := newTestReviewer(t, Config{MaxSteps: 3, Reporter: reporter}, model)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -78,7 +78,7 @@ func TestReviewerRequestsStructuredSubmissionAfterFreeFormText(t *testing.T) {
 		}
 		return message{Role: "assistant", ToolCalls: []toolCall{{ID: "submit", Function: functionCall{Name: submitReviewToolName, Arguments: reviewArguments(`[]`)}}}}, tokenUsage{}, nil
 	})
-	reviewer, err := New(Config{MaxSteps: 3}, makeSnapshot(t), model)
+	reviewer, err := newTestReviewer(t, Config{MaxSteps: 3}, model)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -107,7 +107,7 @@ func TestReviewerRejectsCleanSubmissionWithoutNarrative(t *testing.T) {
 			ID: "valid", Function: functionCall{Name: submitReviewToolName, Arguments: reviewArguments(`[]`)},
 		}}}, tokenUsage{}, nil
 	})
-	reviewer, err := New(Config{MaxSteps: 2}, makeSnapshot(t), model)
+	reviewer, err := newTestReviewer(t, Config{MaxSteps: 2}, model)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -140,7 +140,7 @@ func TestReviewerFeedsRemainingTurnLimitBackToModel(t *testing.T) {
 			ID: "submit", Function: functionCall{Name: submitReviewToolName, Arguments: reviewArguments(`[]`)},
 		}}}, tokenUsage{}, nil
 	})
-	reviewer, err := New(Config{MaxSteps: 2}, makeSnapshot(t), model)
+	reviewer, err := newTestReviewer(t, Config{MaxSteps: 2}, model)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -158,7 +158,7 @@ func TestReviewerReturnsInconclusiveWhenTurnLimitIsExhausted(t *testing.T) {
 		}
 		return message{Role: "assistant", Content: "I need more time to inspect the changes."}, tokenUsage{PromptTokens: 10, CompletionTokens: 5, TotalTokens: 15}, nil
 	})
-	reviewer, err := New(Config{MaxSteps: 1}, makeSnapshot(t), model)
+	reviewer, err := newTestReviewer(t, Config{MaxSteps: 1}, model)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -179,7 +179,7 @@ func TestReviewerAddsCustomInstructionsWithoutReplacingContract(t *testing.T) {
 		}
 		return message{Role: "assistant", ToolCalls: []toolCall{{ID: "submit", Function: functionCall{Name: submitReviewToolName, Arguments: reviewArguments(`[]`)}}}}, tokenUsage{}, nil
 	})
-	reviewer, err := New(Config{MaxSteps: 1, Instructions: "Focus on database migrations"}, makeSnapshot(t), model)
+	reviewer, err := newTestReviewer(t, Config{MaxSteps: 1, Instructions: "Focus on database migrations"}, model)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -194,7 +194,7 @@ func TestReviewerReturnsInconclusiveReviewForProviderOutputLimit(t *testing.T) {
 		calls.Add(1)
 		return message{}, tokenUsage{PromptTokens: 100, CompletionTokens: 50, TotalTokens: 150, Cost: floatPointer(0.001)}, errOutputLimit
 	})
-	reviewer, err := New(Config{MaxSteps: 3}, makeSnapshot(t), model)
+	reviewer, err := newTestReviewer(t, Config{MaxSteps: 3}, model)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -224,7 +224,7 @@ func TestReviewerFeedsResponseLimitBackToModel(t *testing.T) {
 			ID: "submit", Function: functionCall{Name: submitReviewToolName, Arguments: reviewArguments(`[]`)},
 		}}}, tokenUsage{PromptTokens: 25, CompletionTokens: 5, TotalTokens: 30}, nil
 	})
-	reviewer, err := New(Config{MaxSteps: 4}, makeSnapshot(t), model)
+	reviewer, err := newTestReviewer(t, Config{MaxSteps: 4}, model)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -252,7 +252,7 @@ func TestReviewerUsesTimeoutReserveForFinalSubmission(t *testing.T) {
 			ID: "submit", Function: functionCall{Name: submitReviewToolName, Arguments: reviewArguments(`[]`)},
 		}}}, tokenUsage{}, nil
 	})
-	reviewer, err := New(Config{MaxSteps: 4}, makeSnapshot(t), model)
+	reviewer, err := newTestReviewer(t, Config{MaxSteps: 4}, model)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -268,7 +268,7 @@ func TestReviewerReturnsInconclusiveReviewWhenDeadlineExpires(t *testing.T) {
 	model := completionFunc(func(context.Context, []message, []Tool) (message, tokenUsage, error) {
 		return message{}, tokenUsage{}, fmt.Errorf("read streamed model response: %w", context.DeadlineExceeded)
 	})
-	reviewer, err := New(Config{MaxSteps: 3}, makeSnapshot(t), model)
+	reviewer, err := newTestReviewer(t, Config{MaxSteps: 3}, model)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -313,7 +313,7 @@ func TestReviewerPropagatesOrdinaryModelErrors(t *testing.T) {
 	model := completionFunc(func(context.Context, []message, []Tool) (message, tokenUsage, error) {
 		return message{}, tokenUsage{}, want
 	})
-	reviewer, err := New(Config{MaxSteps: 1}, makeSnapshot(t), model)
+	reviewer, err := newTestReviewer(t, Config{MaxSteps: 1}, model)
 	if err != nil {
 		t.Fatal(err)
 	}

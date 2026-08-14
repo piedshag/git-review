@@ -6,12 +6,12 @@ import (
 )
 
 func TestSubmitReviewToolSchemaRequiresStructuredFindings(t *testing.T) {
-	tool := submitReviewTool()
-	if tool.Function.Name != submitReviewToolName {
-		t.Fatalf("unexpected tool name %q", tool.Function.Name)
+	tool := SubmissionTool()
+	if tool.Definition.Name != submitReviewToolName {
+		t.Fatalf("unexpected tool name %q", tool.Definition.Name)
 	}
-	properties := tool.Function.Parameters["properties"].(map[string]any)
-	topLevelRequired := tool.Function.Parameters["required"].([]string)
+	properties := tool.Definition.InputSchema["properties"].(map[string]any)
+	topLevelRequired := tool.Definition.InputSchema["required"].([]string)
 	for _, name := range []string{"summary", "strengths", "weaknesses", "findings"} {
 		if !contains(topLevelRequired, name) {
 			t.Errorf("submission schema does not require %q", name)
@@ -23,6 +23,16 @@ func TestSubmitReviewToolSchemaRequiresStructuredFindings(t *testing.T) {
 	for _, name := range []string{"severity", "summary", "explanation", "file", "line"} {
 		if !contains(required, name) {
 			t.Errorf("finding schema does not require %q", name)
+		}
+	}
+	for _, property := range []map[string]any{
+		properties["summary"].(map[string]any),
+		properties["strengths"].(map[string]any),
+		properties["weaknesses"].(map[string]any),
+		item["properties"].(map[string]any)["explanation"].(map[string]any),
+	} {
+		if _, ok := property["maxLength"]; ok {
+			t.Errorf("long review text uses a maxLength grammar repetition: %#v", property)
 		}
 	}
 }
@@ -96,6 +106,15 @@ func TestReviewSubmissionValidation(t *testing.T) {
 				t.Fatalf("expected error containing %q, got %v", test.errorText, err)
 			}
 		})
+	}
+}
+
+func TestReviewSubmissionStillEnforcesNarrativeLimit(t *testing.T) {
+	arguments := reviewArguments(`[]`)
+	arguments = strings.Replace(arguments, testChangeSummary, strings.Repeat("x", 4001), 1)
+	_, err := parseReviewSubmission(arguments)
+	if err == nil || !strings.Contains(err.Error(), "summary must contain 20 to 4000 characters") {
+		t.Fatalf("expected summary length error, got %v", err)
 	}
 }
 

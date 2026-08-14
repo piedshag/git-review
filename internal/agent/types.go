@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"strings"
 	"time"
+
+	"github.com/piedshag/git-review/internal/toolset"
 )
 
 type Message struct {
@@ -37,28 +39,6 @@ type ReasoningDetail struct {
 	ID        json.RawMessage `json:"id,omitempty"`
 	Format    json.RawMessage `json:"format,omitempty"`
 	Index     json.RawMessage `json:"index,omitempty"`
-}
-
-type Tool struct {
-	Type     string       `json:"type"`
-	Function ToolFunction `json:"function"`
-}
-
-type ToolFunction struct {
-	Name        string         `json:"name"`
-	Description string         `json:"description"`
-	Parameters  map[string]any `json:"parameters"`
-}
-
-func ObjectSchema(properties map[string]any, required []string) map[string]any {
-	if properties == nil {
-		properties = map[string]any{}
-	}
-	result := map[string]any{"type": "object", "properties": properties, "additionalProperties": false}
-	if len(required) > 0 {
-		result["required"] = required
-	}
-	return result
 }
 
 type TokenUsage struct {
@@ -126,7 +106,7 @@ func ByteCount(size int) string {
 }
 
 type CompletionClient interface {
-	Complete(context.Context, []Message, []Tool) (Message, TokenUsage, error)
+	Complete(context.Context, []Message, []toolset.Definition) (Message, TokenUsage, error)
 }
 
 type Reporter interface {

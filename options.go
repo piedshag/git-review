@@ -15,7 +15,7 @@ import (
 
 const defaultMaxSteps = 30
 
-const usage = `git-review reviews a Git branch with an OpenAI-compatible model.
+const reviewUsage = `git-review reviews a Git branch with an OpenAI-compatible model.
 
 Usage:
   git-review [flags] <branch> [flags]
@@ -27,6 +27,15 @@ Environment:
   OPENAI_BASE_URL         API base URL (default: https://api.openai.com/v1)
   OPENAI_MODEL            Model name (default: gpt-5)
   GIT_REVIEW_INSTRUCTIONS Additional review instructions
+`
+
+const mcpUsage = `git-review exposes read-only Git review tools over MCP stdio.
+
+Usage:
+  git-review mcp [flags] <branch> [flags]
+
+The branch and base are selected at startup and cannot be changed by MCP clients.
+Protocol messages are written to stdout; errors are written to stderr.
 `
 
 type options struct {
@@ -70,7 +79,7 @@ func parseOptions(arguments []string, output io.Writer) (options, error) {
 	formatName := fs.String("format", "markdown", "output format: markdown or json")
 	instructions := fs.String("instructions", env("GIT_REVIEW_INSTRUCTIONS", ""), "additional review instructions")
 	instructionsFile := fs.String("instructions-file", "", "read additional review instructions from a file, or - for stdin")
-	fs.Usage = func() { fmt.Fprint(fs.Output(), usage); fs.PrintDefaults() }
+	fs.Usage = func() { fmt.Fprint(fs.Output(), reviewUsage); fs.PrintDefaults() }
 
 	if err := parseInterspersed(fs, arguments); err != nil {
 		return options{}, err
@@ -129,6 +138,28 @@ func parseOptions(arguments []string, output io.Writer) (options, error) {
 		instructions:     *instructions,
 		instructionsFile: *instructionsFile,
 	}, nil
+}
+
+type mcpOptions struct {
+	repoPath string
+	base     string
+	branch   string
+}
+
+func parseMCPOptions(arguments []string, output io.Writer) (mcpOptions, error) {
+	fs := flag.NewFlagSet("git-review mcp", flag.ContinueOnError)
+	fs.SetOutput(output)
+	repoPath := fs.String("repo", ".", "path inside the Git repository")
+	base := fs.String("base", "", "base branch or revision (auto-detected when omitted)")
+	fs.Usage = func() { fmt.Fprint(fs.Output(), mcpUsage); fs.PrintDefaults() }
+	if err := parseInterspersed(fs, arguments); err != nil {
+		return mcpOptions{}, err
+	}
+	if fs.NArg() != 1 {
+		fs.Usage()
+		return mcpOptions{}, errors.New("exactly one branch is required")
+	}
+	return mcpOptions{repoPath: *repoPath, base: *base, branch: fs.Arg(0)}, nil
 }
 
 func validReasoningEffort(value string) bool {
