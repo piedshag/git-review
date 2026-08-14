@@ -1,6 +1,7 @@
 package review
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -9,6 +10,8 @@ import (
 	"strings"
 	"time"
 	"unicode/utf8"
+
+	"github.com/piedshag/git-review/internal/toolset"
 )
 
 const submitReviewToolName = "submit_review"
@@ -30,11 +33,11 @@ type Review struct {
 	Stats      ReviewStats  `json:"stats"`
 }
 
-type submittedReview struct {
-	Summary    string
-	Strengths  string
-	Weaknesses string
-	Findings   []Finding
+type Submission struct {
+	Summary    string    `json:"summary"`
+	Strengths  string    `json:"strengths"`
+	Weaknesses string    `json:"weaknesses"`
+	Findings   []Finding `json:"findings"`
 }
 
 type Finding struct {
@@ -57,56 +60,78 @@ type ReviewStats struct {
 	CostComplete   bool     `json:"cost_complete"`
 }
 
-func submitReviewTool() Tool {
-	return Tool{Type: "function", Function: ToolFunction{
-		Name:        submitReviewToolName,
-		Description: "Submit the final code review with a change summary, strengths, weaknesses, and structured findings. Call exactly once after inspection, with an empty findings array when no defects were found.",
-		Parameters: objectSchema(map[string]any{
-			"summary":    map[string]any{"type": "string", "minLength": 20, "maxLength": 4000, "description": "Summarize the changes introduced by the branch and their purpose."},
-			"strengths":  map[string]any{"type": "string", "minLength": 20, "maxLength": 4000, "description": "Explain what the implementation does well. State clearly when no notable strengths were identified."},
-			"weaknesses": map[string]any{"type": "string", "minLength": 20, "maxLength": 4000, "description": "Explain weaknesses, tradeoffs, or remaining concerns. State clearly when none were identified; concrete defects must also appear in findings."},
-			"findings": map[string]any{
-				"type":     "array",
-				"maxItems": 100,
-				"items": map[string]any{
-					"type": "object",
-					"properties": map[string]any{
-						"severity":    map[string]any{"type": "string", "enum": []string{"critical", "high", "medium", "low"}, "description": "Impact severity."},
-						"summary":     map[string]any{"type": "string", "minLength": 3, "maxLength": 80, "description": "A concise summary of at most 12 words."},
-						"explanation": map[string]any{"type": "string", "minLength": 20, "maxLength": 4000, "description": "Detailed explanation of the defect, its impact, and a suggested fix."},
-						"file":        map[string]any{"type": "string", "minLength": 1, "description": "Repository-relative target-branch file path."},
-						"line":        map[string]any{"type": "integer", "minimum": 1, "description": "Relevant target-branch line number."},
-					},
-					"required":             []string{"severity", "summary", "explanation", "file", "line"},
-					"additionalProperties": false,
+func SubmissionTool() toolset.Tool {
+	schema := objectSchema(map[string]any{
+		"summary":    map[string]any{"type": "string", "minLength": 20, "description": "Summarize the changes introduced by the branch and their purpose. Must not exceed 4000 characters."},
+		"strengths":  map[string]any{"type": "string", "minLength": 20, "description": "Explain what the implementation does well. State clearly when no notable strengths were identified. Must not exceed 4000 characters."},
+		"weaknesses": map[string]any{"type": "string", "minLength": 20, "description": "Explain weaknesses, tradeoffs, or remaining concerns. State clearly when none were identified; concrete defects must also appear in findings. Must not exceed 4000 characters."},
+		"findings": map[string]any{
+			"type":     "array",
+			"maxItems": 100,
+			"items": map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"severity":    map[string]any{"type": "string", "enum": []string{"critical", "high", "medium", "low"}, "description": "Impact severity."},
+					"summary":     map[string]any{"type": "string", "minLength": 3, "maxLength": 80, "description": "A concise summary of at most 12 words."},
+					"explanation": map[string]any{"type": "string", "minLength": 20, "description": "Detailed explanation of the defect, its impact, and a suggested fix. Must not exceed 4000 characters."},
+					"file":        map[string]any{"type": "string", "minLength": 1, "description": "Repository-relative target-branch file path."},
+					"line":        map[string]any{"type": "integer", "minimum": 1, "description": "Relevant target-branch line number."},
 				},
+				"required":             []string{"severity", "summary", "explanation", "file", "line"},
+				"additionalProperties": false,
 			},
-		}, []string{"summary", "strengths", "weaknesses", "findings"}),
-	}}
+		},
+	}, []string{"summary", "strengths", "weaknesses", "findings"})
+	return toolset.Tool{
+		Definition: toolset.Definition{
+			Name:         submitReviewToolName,
+			Description:  "Submit the final code review with a change summary, strengths, weaknesses, and structured findings. Call exactly once after inspection, with an empty findings array when no defects were found.",
+			InputSchema:  schema,
+			OutputSchema: schema,
+		},
+		Handler: func(_ context.Context, arguments json.RawMessage) (toolset.Result, error) {
+			submission, err := parseReviewSubmission(string(arguments))
+			if err != nil {
+				return toolset.Result{}, fmt.Errorf("invalid review submission: %w", err)
+			}
+			return toolset.Result{
+				Text: renderReviewBody(Review{
+					Status: ReviewComplete, Summary: submission.Summary, Strengths: submission.Strengths,
+					Weaknesses: submission.Weaknesses, Findings: submission.Findings,
+				}),
+				Structured: submission,
+				Final:      true,
+			}, nil
+		},
+	}
 }
 
-func parseReviewSubmission(arguments string) (submittedReview, error) {
+func SubmissionTools() (*toolset.Registry, error) {
+	return toolset.New(SubmissionTool())
+}
+
+func parseReviewSubmission(arguments string) (Submission, error) {
 	var fields map[string]json.RawMessage
 	if err := json.Unmarshal([]byte(arguments), &fields); err != nil {
-		return submittedReview{}, fmt.Errorf("invalid JSON: %w", err)
+		return Submission{}, fmt.Errorf("invalid JSON: %w", err)
 	}
 	for _, name := range []string{"summary", "strengths", "weaknesses", "findings"} {
 		if _, ok := fields[name]; !ok {
-			return submittedReview{}, fmt.Errorf("%s is required", name)
+			return Submission{}, fmt.Errorf("%s is required", name)
 		}
 	}
 	if len(fields) != 4 {
-		return submittedReview{}, errors.New("only summary, strengths, weaknesses, and findings are allowed")
+		return Submission{}, errors.New("only summary, strengths, weaknesses, and findings are allowed")
 	}
-	var submission submittedReview
+	var submission Submission
 	if err := json.Unmarshal(fields["summary"], &submission.Summary); err != nil {
-		return submittedReview{}, errors.New("summary must be a string")
+		return Submission{}, errors.New("summary must be a string")
 	}
 	if err := json.Unmarshal(fields["strengths"], &submission.Strengths); err != nil {
-		return submittedReview{}, errors.New("strengths must be a string")
+		return Submission{}, errors.New("strengths must be a string")
 	}
 	if err := json.Unmarshal(fields["weaknesses"], &submission.Weaknesses); err != nil {
-		return submittedReview{}, errors.New("weaknesses must be a string")
+		return Submission{}, errors.New("weaknesses must be a string")
 	}
 	submission.Summary = strings.TrimSpace(submission.Summary)
 	submission.Strengths = strings.TrimSpace(submission.Strengths)
@@ -121,25 +146,25 @@ func parseReviewSubmission(arguments string) (submittedReview, error) {
 	}
 	for _, field := range narrative {
 		if count := utf8.RuneCountInString(field.value); count < 20 || count > 4000 {
-			return submittedReview{}, fmt.Errorf("%s must contain 20 to 4000 characters", field.name)
+			return Submission{}, fmt.Errorf("%s must contain 20 to 4000 characters", field.name)
 		}
 	}
 	var rawItems []json.RawMessage
 	if err := json.Unmarshal(fields["findings"], &rawItems); err != nil {
-		return submittedReview{}, fmt.Errorf("findings must be an array: %w", err)
+		return Submission{}, fmt.Errorf("findings must be an array: %w", err)
 	}
 	if rawItems == nil {
-		return submittedReview{}, errors.New("findings must be an array, not null")
+		return Submission{}, errors.New("findings must be an array, not null")
 	}
 	if len(rawItems) > 100 {
-		return submittedReview{}, errors.New("findings cannot contain more than 100 items")
+		return Submission{}, errors.New("findings cannot contain more than 100 items")
 	}
 	submission.Findings = make([]Finding, len(rawItems))
 	for i, rawItem := range rawItems {
 		decoder := json.NewDecoder(strings.NewReader(string(rawItem)))
 		decoder.DisallowUnknownFields()
 		if err := decoder.Decode(&submission.Findings[i]); err != nil {
-			return submittedReview{}, fmt.Errorf("finding %d: invalid fields: %w", i+1, err)
+			return Submission{}, fmt.Errorf("finding %d: invalid fields: %w", i+1, err)
 		}
 		finding := &submission.Findings[i]
 		finding.Severity = strings.ToLower(strings.TrimSpace(finding.Severity))
@@ -147,7 +172,7 @@ func parseReviewSubmission(arguments string) (submittedReview, error) {
 		finding.Explanation = strings.TrimSpace(finding.Explanation)
 		finding.File = path.Clean(strings.TrimSpace(finding.File))
 		if err := validateFinding(*finding); err != nil {
-			return submittedReview{}, fmt.Errorf("finding %d: %w", i+1, err)
+			return Submission{}, fmt.Errorf("finding %d: %w", i+1, err)
 		}
 	}
 	return submission, nil
@@ -193,31 +218,32 @@ func sortedFindings(findings []Finding) []Finding {
 }
 
 func renderMarkdown(review Review) string {
-	body := ""
+	return renderReviewBody(review) + "\n\n---\n\n**Review stats:** " + formatReviewStats(review.Stats)
+}
+
+func renderReviewBody(review Review) string {
 	if review.Status == ReviewInconclusive {
-		body = "# Review\n\n**Inconclusive:** " + review.Message
-	} else {
-		var output strings.Builder
-		fmt.Fprintf(&output, "# Review\n\n## Change summary\n\n%s\n\n", review.Summary)
-		fmt.Fprintf(&output, "## Strengths\n\n%s\n\n", review.Strengths)
-		fmt.Fprintf(&output, "## Weaknesses\n\n%s\n\n", review.Weaknesses)
-		output.WriteString("## Findings\n\n")
-		if len(review.Findings) == 0 {
-			output.WriteString("No findings.\n")
-		}
-		ordered := sortedFindings(review.Findings)
-		for i, finding := range ordered {
-			if i > 0 {
-				output.WriteString("\n")
-			}
-			fmt.Fprintf(&output, "### [%s] %s\n\n", strings.ToUpper(finding.Severity), finding.Summary)
-			fmt.Fprintf(&output, "`%s:%d`\n\n", strings.ReplaceAll(finding.File, "`", "\\`"), finding.Line)
-			output.WriteString(finding.Explanation)
+		return "# Review\n\n**Inconclusive:** " + review.Message
+	}
+	var output strings.Builder
+	fmt.Fprintf(&output, "# Review\n\n## Change summary\n\n%s\n\n", review.Summary)
+	fmt.Fprintf(&output, "## Strengths\n\n%s\n\n", review.Strengths)
+	fmt.Fprintf(&output, "## Weaknesses\n\n%s\n\n", review.Weaknesses)
+	output.WriteString("## Findings\n\n")
+	if len(review.Findings) == 0 {
+		output.WriteString("No findings.\n")
+	}
+	ordered := sortedFindings(review.Findings)
+	for i, finding := range ordered {
+		if i > 0 {
 			output.WriteString("\n")
 		}
-		body = strings.TrimSpace(output.String())
+		fmt.Fprintf(&output, "### [%s] %s\n\n", strings.ToUpper(finding.Severity), finding.Summary)
+		fmt.Fprintf(&output, "`%s:%d`\n\n", strings.ReplaceAll(finding.File, "`", "\\`"), finding.Line)
+		output.WriteString(finding.Explanation)
+		output.WriteString("\n")
 	}
-	return body + "\n\n---\n\n**Review stats:** " + formatReviewStats(review.Stats)
+	return strings.TrimSpace(output.String())
 }
 
 func formatReviewStats(stats ReviewStats) string {

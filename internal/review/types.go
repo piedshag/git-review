@@ -3,14 +3,14 @@ package review
 import (
 	"github.com/piedshag/git-review/internal/agent"
 	"github.com/piedshag/git-review/internal/openai"
+	"github.com/piedshag/git-review/internal/toolset"
 )
 
 type message = agent.Message
 type toolCall = agent.ToolCall
 type functionCall = agent.FunctionCall
 type tokenUsage = agent.TokenUsage
-type Tool = agent.Tool
-type ToolFunction = agent.ToolFunction
+type Tool = toolset.Definition
 
 var (
 	errOutputLimit   = openai.ErrOutputLimit
@@ -18,5 +18,5 @@ var (
 )
 
 func objectSchema(properties map[string]any, required []string) map[string]any {
-	return agent.ObjectSchema(properties, required)
+	return toolset.ObjectSchema(properties, required)
 }

@@ -3,7 +3,7 @@ package gitrepo
 import (
 	"bufio"
 	"bytes"
-	"encoding/json"
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -12,8 +12,6 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/piedshag/git-review/internal/agent"
-
 	git "github.com/go-git/go-git/v5"
 	"github.com/go-git/go-git/v5/plumbing"
 	fdiff "github.com/go-git/go-git/v5/plumbing/format/diff"
@@ -21,9 +19,8 @@ import (
 )
 
 const (
-	maxToolOutput = 64 * 1024
-	maxReadLines  = 400
-	maxMatches    = 100
+	maxReadLines = 400
+	maxMatches   = 100
 )
 
 // Snapshot exposes only immutable Git objects at the base and target commits.
@@ -100,52 +97,6 @@ func (s *Snapshot) Description() string {
 	return fmt.Sprintf("target %s (%s), base %s at merge-base (%s)", s.targetName, s.target.Hash, s.baseName, s.base.Hash)
 }
 
-func (s *Snapshot) Tools() []agent.Tool {
-	refProperty := map[string]any{"type": "string", "enum": []string{"target", "base"}, "description": "Git snapshot to inspect; defaults to target"}
-	return []agent.Tool{
-		{Type: "function", Function: agent.ToolFunction{Name: "stat", Description: "List files changed between the merge-base and target, with status and line counts.", Parameters: agent.ObjectSchema(nil, nil)}},
-		{Type: "function", Function: agent.ToolFunction{Name: "diff", Description: "Show unified base-to-target diff hunks with target line numbers. Optionally restrict to one changed path.", Parameters: agent.ObjectSchema(map[string]any{"path": map[string]any{"type": "string", "description": "Optional repository-relative changed file path"}, "context": map[string]any{"type": "integer", "minimum": 1, "maximum": 20, "description": "Unchanged lines around each hunk; defaults to 3"}}, nil)}},
-		{Type: "function", Function: agent.ToolFunction{Name: "glob", Description: "List repository paths matching a glob. Supports *, ?, and **.", Parameters: agent.ObjectSchema(map[string]any{"pattern": map[string]any{"type": "string"}, "ref": refProperty}, []string{"pattern"})}},
-		{Type: "function", Function: agent.ToolFunction{Name: "grep", Description: "Search text files in a Git snapshot with a Go regular expression.", Parameters: agent.ObjectSchema(map[string]any{"pattern": map[string]any{"type": "string"}, "glob": map[string]any{"type": "string", "description": "Optional path glob"}, "ref": refProperty}, []string{"pattern"})}},
-		{Type: "function", Function: agent.ToolFunction{Name: "read", Description: "Read numbered lines from a file stored in a Git snapshot. Use ref=base to inspect deleted or previous content.", Parameters: agent.ObjectSchema(map[string]any{"path": map[string]any{"type": "string"}, "ref": refProperty, "start": map[string]any{"type": "integer", "minimum": 1}, "end": map[string]any{"type": "integer", "minimum": 1}}, []string{"path"})}},
-	}
-}
-
-func (s *Snapshot) Call(name, rawArguments string) string {
-	var args struct {
-		Pattern string `json:"pattern"`
-		Glob    string `json:"glob"`
-		Path    string `json:"path"`
-		Ref     string `json:"ref"`
-		Start   int    `json:"start"`
-		End     int    `json:"end"`
-		Context *int   `json:"context"`
-	}
-	if err := json.Unmarshal([]byte(rawArguments), &args); err != nil {
-		return "error: invalid arguments: " + err.Error()
-	}
-	var output string
-	var err error
-	switch name {
-	case "stat":
-		output, err = s.stat()
-	case "diff":
-		output, err = s.diff(args.Path, args.Context)
-	case "glob":
-		output, err = s.glob(args.Pattern, args.Ref)
-	case "grep":
-		output, err = s.grep(args.Pattern, args.Glob, args.Ref)
-	case "read":
-		output, err = s.read(args.Path, args.Ref, args.Start, args.End)
-	default:
-		err = fmt.Errorf("unknown tool %q", name)
-	}
-	if err != nil {
-		return "error: " + err.Error()
-	}
-	return truncate(output, maxToolOutput)
-}
-
 type selectedPatch struct {
 	files []fdiff.FilePatch
 }
@@ -153,7 +104,10 @@ type selectedPatch struct {
 func (p selectedPatch) FilePatches() []fdiff.FilePatch { return p.files }
 func (selectedPatch) Message() string                  { return "" }
 
-func (s *Snapshot) diff(name string, contextLines *int) (string, error) {
+func (s *Snapshot) Diff(ctx context.Context, name string, contextLines *int) (string, error) {
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
 	context := fdiff.DefaultContextLines
 	if contextLines != nil {
 		context = *contextLines
@@ -176,6 +130,9 @@ func (s *Snapshot) diff(name string, contextLines *int) (string, error) {
 	if clean != "" {
 		files = nil
 		for _, filePatch := range patch.FilePatches() {
+			if err := ctx.Err(); err != nil {
+				return "", err
+			}
 			from, to := filePatch.Files()
 			if (from != nil && from.Path() == clean) || (to != nil && to.Path() == clean) {
 				files = append(files, filePatch)
@@ -206,7 +163,10 @@ func (s *Snapshot) commit(ref string) (*object.Commit, error) {
 	}
 }
 
-func (s *Snapshot) stat() (string, error) {
+func (s *Snapshot) Stat(ctx context.Context) (string, error) {
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
 	patch, err := s.base.Patch(s.target)
 	if err != nil {
 		return "", err
@@ -217,6 +177,9 @@ func (s *Snapshot) stat() (string, error) {
 	}
 	var lines []string
 	for _, filePatch := range patch.FilePatches() {
+		if err := ctx.Err(); err != nil {
+			return "", err
+		}
 		from, to := filePatch.Files()
 		status, name := "M", ""
 		switch {
@@ -240,7 +203,7 @@ func (s *Snapshot) stat() (string, error) {
 	return strings.Join(lines, "\n"), nil
 }
 
-func (s *Snapshot) glob(pattern, ref string) (string, error) {
+func (s *Snapshot) Glob(ctx context.Context, pattern, ref string) (string, error) {
 	if pattern == "" {
 		return "", errors.New("pattern is required")
 	}
@@ -258,6 +221,9 @@ func (s *Snapshot) glob(pattern, ref string) (string, error) {
 	}
 	var paths []string
 	err = tree.Files().ForEach(func(file *object.File) error {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		if matcher.MatchString(file.Name) {
 			paths = append(paths, file.Name)
 		}
@@ -273,7 +239,7 @@ func (s *Snapshot) glob(pattern, ref string) (string, error) {
 	return strings.Join(paths, "\n"), nil
 }
 
-func (s *Snapshot) grep(pattern, fileGlob, ref string) (string, error) {
+func (s *Snapshot) Grep(ctx context.Context, pattern, fileGlob, ref string) (string, error) {
 	if pattern == "" {
 		return "", errors.New("pattern is required")
 	}
@@ -298,6 +264,9 @@ func (s *Snapshot) grep(pattern, fileGlob, ref string) (string, error) {
 	}
 	var matches []string
 	err = tree.Files().ForEach(func(file *object.File) error {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		if len(matches) >= maxMatches || (matcher != nil && !matcher.MatchString(file.Name)) {
 			return nil
 		}
@@ -310,6 +279,9 @@ func (s *Snapshot) grep(pattern, fileGlob, ref string) (string, error) {
 		scanner.Buffer(make([]byte, 64*1024), 1024*1024)
 		line := 0
 		for scanner.Scan() && len(matches) < maxMatches {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
 			line++
 			text := scanner.Text()
 			if strings.IndexByte(text, 0) >= 0 {
@@ -330,7 +302,10 @@ func (s *Snapshot) grep(pattern, fileGlob, ref string) (string, error) {
 	return strings.Join(matches, "\n"), nil
 }
 
-func (s *Snapshot) read(name, ref string, start, end int) (string, error) {
+func (s *Snapshot) Read(ctx context.Context, name, ref string, start, end int) (string, error) {
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
 	clean := path.Clean(name)
 	if name == "" || clean == "." || strings.HasPrefix(clean, "../") || path.IsAbs(clean) {
 		return "", errors.New("path must be a repository-relative file path")
@@ -401,11 +376,4 @@ func compileGlob(pattern string) (*regexp.Regexp, error) {
 	}
 	out.WriteString("$")
 	return regexp.Compile(out.String())
-}
-
-func truncate(value string, limit int) string {
-	if len(value) <= limit {
-		return value
-	}
-	return value[:limit] + "\n[output truncated]"
 }

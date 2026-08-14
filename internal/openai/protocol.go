@@ -4,6 +4,7 @@ import (
 	"errors"
 
 	"github.com/piedshag/git-review/internal/agent"
+	"github.com/piedshag/git-review/internal/toolset"
 )
 
 var (
@@ -17,7 +18,6 @@ type functionCall = agent.FunctionCall
 type reasoningDetail = agent.ReasoningDetail
 type tokenUsage = agent.TokenUsage
 type streamStats = agent.StreamStats
-type Tool = agent.Tool
 
 var (
 	errOutputLimit   = ErrOutputLimit
@@ -27,11 +27,32 @@ var (
 type request struct {
 	Model           string            `json:"model"`
 	Messages        []message         `json:"messages"`
-	Tools           []Tool            `json:"tools"`
+	Tools           []wireTool        `json:"tools"`
 	Stream          bool              `json:"stream,omitempty"`
 	StreamOptions   *streamOptions    `json:"stream_options,omitempty"`
 	Reasoning       *reasoningOptions `json:"reasoning,omitempty"`
 	ReasoningEffort string            `json:"reasoning_effort,omitempty"`
+}
+
+type wireTool struct {
+	Type     string           `json:"type"`
+	Function wireToolFunction `json:"function"`
+}
+
+type wireToolFunction struct {
+	Name        string         `json:"name"`
+	Description string         `json:"description"`
+	Parameters  map[string]any `json:"parameters"`
+}
+
+func wireTools(definitions []toolset.Definition) []wireTool {
+	tools := make([]wireTool, len(definitions))
+	for i, definition := range definitions {
+		tools[i] = wireTool{Type: "function", Function: wireToolFunction{
+			Name: definition.Name, Description: definition.Description, Parameters: definition.InputSchema,
+		}}
+	}
+	return tools
 }
 
 type streamOptions struct {

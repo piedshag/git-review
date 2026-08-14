@@ -80,3 +80,13 @@ func TestParseOptionsDefaultsToThirtySteps(t *testing.T) {
 		t.Fatalf("max steps=%d, want 30", options.maxSteps)
 	}
 }
+
+func TestParseMCPOptionsSupportsInterspersedFlags(t *testing.T) {
+	options, err := parseMCPOptions([]string{"feature", "--base", "main", "--repo", "/repo"}, io.Discard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if options.branch != "feature" || options.base != "main" || options.repoPath != "/repo" {
+		t.Fatalf("unexpected options: %+v", options)
+	}
+}

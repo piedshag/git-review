@@ -2,6 +2,11 @@
 
 A small, read-only Go CLI that asks an OpenAI-compatible model to review a Git branch. The model can inspect the repository through five bounded tools—`stat`, `diff`, `glob`, `grep`, and `read`—all implemented against immutable Git objects with [`go-git`](https://github.com/go-git/go-git). The program does not invoke Git, a shell, or any other subprocess.
 
+The same tools can be served over MCP stdio for use by another agent harness.
+Both modes use the same Git operations, schemas, validation, bounds, and
+structured `submit_review` result; MCP is a protocol adapter, not a second
+implementation.
+
 The model must finish through a validated `submit_review` tool. Every submission
 includes a summary of the changes, strengths, weaknesses, and structured
 findings. Every finding has a `critical`, `high`, `medium`, or `low` severity, a
@@ -108,6 +113,47 @@ Use `--binary PATH` or `GIT_REVIEW_BIN` when the executable is elsewhere. Set
 three focused prompts. Because these are three independent model conversations,
 expect roughly three times the tokens and cost of a single review.
 
+## MCP server
+
+Use the `mcp` subcommand to give an MCP-capable harness the same narrowly
+scoped review tools without using the built-in OpenAI client:
+
+```sh
+./git-review mcp --repo /path/to/repository --base main feature/my-change
+```
+
+The server communicates over stdin/stdout. It writes only MCP protocol messages
+to stdout, and it does not need an API key or model configuration. A typical
+harness configuration looks like:
+
+```json
+{
+  "mcpServers": {
+    "git-review": {
+      "command": "/absolute/path/to/git-review",
+      "args": [
+        "mcp",
+        "--repo", "/absolute/path/to/repository",
+        "--base", "main",
+        "feature/my-change"
+      ]
+    }
+  }
+}
+```
+
+The human launching the server selects the repository, base, and target. They
+are resolved to immutable commits at startup and are not MCP tool arguments, so
+the connected agent cannot switch repositories or request arbitrary revisions.
+The server exposes `stat`, `diff`, `glob`, `grep`, `read`, and
+`submit_review`. The final tool returns readable Markdown as MCP text content
+and the validated review object as structured content.
+
+An external harness controls its own agent loop, so `git-review` cannot force
+that harness to stop after `submit_review`. It can still guarantee that every
+successful submission has the same validated structure as a native review.
+Run `./git-review mcp -h` for the server-specific flags.
+
 When the endpoint includes `usage.cost`, the activity log reports it. Otherwise, pass the model's prices in US dollars per million tokens to estimate cost locally:
 
 ```sh
@@ -177,6 +223,10 @@ OPENAI_MODEL=my-tool-capable-model \
 - Reads, search results, payloads, tool turns, and review duration are bounded.
 - No subprocess API is used anywhere in the application.
 
+These repository-access guarantees also apply in MCP mode. The external harness
+itself may have other capabilities; restricting or disabling those is the
+harness operator's responsibility.
+
 The process still needs network access to the configured model endpoint and read access to the repository's `.git` object database. In CI, pin the built binary and dependencies, use a read-only checkout, and scope the API credential to the model service.
 
 ## Code organization
@@ -184,8 +234,11 @@ The process still needs network access to the configured model endpoint and read
 The root package contains only command-line parsing and application wiring. The
 implementation is split into small internal packages with one responsibility:
 
-- `internal/agent` defines the model messages, tools, usage, and reporting contracts.
-- `internal/gitrepo` exposes bounded read-only operations over Git objects.
+- `internal/agent` defines model messages, usage, and reporting contracts.
+- `internal/toolset` defines the transport-neutral tool registry and results.
+- `internal/gitrepo` exposes pure, bounded read-only operations over Git objects.
+- `internal/gittools` binds those Git operations to schemas and tool handlers.
+- `internal/mcpserver` adapts the shared tools to the official MCP Go SDK.
 - `internal/openai` implements the OpenAI-compatible Chat Completions transport.
-- `internal/review` owns the review loop, limits, instructions, validation, and output formats.
+- `internal/review` owns the review loop, `submit_review`, limits, instructions, validation, and output formats.
 - `internal/report` renders verbose logs and interactive progress.

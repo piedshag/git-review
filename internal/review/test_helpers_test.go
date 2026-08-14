@@ -8,7 +8,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/piedshag/git-review/internal/agent"
 	"github.com/piedshag/git-review/internal/gitrepo"
+	"github.com/piedshag/git-review/internal/gittools"
+	"github.com/piedshag/git-review/internal/toolset"
 
 	git "github.com/go-git/go-git/v5"
 	"github.com/go-git/go-git/v5/plumbing"
@@ -60,4 +63,22 @@ func makeSnapshot(t *testing.T) *gitrepo.Snapshot {
 		t.Fatal(err)
 	}
 	return snapshot
+}
+
+func newTestReviewer(t *testing.T, config Config, model agent.CompletionClient) (*Reviewer, error) {
+	t.Helper()
+	snapshot := makeSnapshot(t)
+	gitSet, err := gittools.New(snapshot)
+	if err != nil {
+		return nil, err
+	}
+	submissionSet, err := SubmissionTools()
+	if err != nil {
+		return nil, err
+	}
+	tools, err := toolset.Combine(gitSet, submissionSet)
+	if err != nil {
+		return nil, err
+	}
+	return New(config, snapshot.Description(), tools, model)
 }
