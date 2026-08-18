@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -27,6 +28,7 @@ Environment:
   OPENAI_BASE_URL         API base URL (default: https://api.openai.com/v1)
   OPENAI_MODEL            Model name (default: gpt-5)
   GIT_REVIEW_INSTRUCTIONS Additional review instructions
+  GIT_REVIEW_EXTRA_BODY   Extra JSON object merged into each request body
 `
 
 type options struct {
@@ -45,6 +47,7 @@ type options struct {
 	maxResponseMiB   int
 	excludeReasoning bool
 	reasoningEffort  string
+	extraBody        map[string]json.RawMessage
 	format           reviewpkg.OutputFormat
 	instructions     string
 	instructionsFile string
@@ -69,6 +72,7 @@ func parseOptions(arguments []string, output io.Writer) (options, error) {
 	reasoningEffort := fs.String("reasoning-effort", "medium", "reasoning effort: none, minimal, low, medium, high, xhigh, max, or empty")
 	formatName := fs.String("format", "markdown", "output format: markdown or json")
 	instructions := fs.String("instructions", env("GIT_REVIEW_INSTRUCTIONS", ""), "additional review instructions")
+	extraBody := fs.String("extra-body", env("GIT_REVIEW_EXTRA_BODY", ""), `extra JSON object merged into each request body, e.g. '{"chat_template_kwargs":{"enable_thinking":true}}'`)
 	instructionsFile := fs.String("instructions-file", "", "read additional review instructions from a file, or - for stdin")
 	fs.Usage = func() { fmt.Fprint(fs.Output(), usage); fs.PrintDefaults() }
 
@@ -106,6 +110,10 @@ func parseOptions(arguments []string, output io.Writer) (options, error) {
 	if !validReasoningEffort(*reasoningEffort) {
 		return options{}, errors.New("reasoning-effort must be none, minimal, low, medium, high, xhigh, max, or empty")
 	}
+	extra, err := parseExtraBody(*extraBody)
+	if err != nil {
+		return options{}, err
+	}
 	if instructionsSet && strings.TrimSpace(*instructions) != "" && strings.TrimSpace(*instructionsFile) != "" {
 		return options{}, errors.New("instructions and instructions-file cannot be used together")
 	}
@@ -125,10 +133,36 @@ func parseOptions(arguments []string, output io.Writer) (options, error) {
 		maxResponseMiB:   *maxResponseMiB,
 		excludeReasoning: *excludeReasoning,
 		reasoningEffort:  *reasoningEffort,
+		extraBody:        extra,
 		format:           format,
 		instructions:     *instructions,
 		instructionsFile: *instructionsFile,
 	}, nil
+}
+
+// parseExtraBody decodes the --extra-body JSON object. Providers put
+// non-standard controls in the request body - vLLM and SGLang read
+// chat_template_kwargs, for one - and this is the only way to reach them
+// without a field per provider. Keys the client owns are rejected rather than
+// silently overridden, so a typo cannot replace the messages or the tools.
+func parseExtraBody(value string) (map[string]json.RawMessage, error) {
+	trimmed := strings.TrimSpace(value)
+	if trimmed == "" {
+		return nil, nil
+	}
+	var extra map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(trimmed), &extra); err != nil {
+		return nil, fmt.Errorf("extra-body must be a JSON object: %w", err)
+	}
+	if len(extra) == 0 {
+		return nil, nil
+	}
+	for _, reserved := range []string{"model", "messages", "tools", "stream", "stream_options"} {
+		if _, found := extra[reserved]; found {
+			return nil, fmt.Errorf("extra-body cannot set %q", reserved)
+		}
+	}
+	return extra, nil
 }
 
 func validReasoningEffort(value string) bool {

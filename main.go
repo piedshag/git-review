@@ -45,6 +45,7 @@ func run() error {
 		MaxResponseBytes: options.maxResponseMiB * 1024 * 1024,
 		ExcludeReasoning: options.excludeReasoning,
 		ReasoningEffort:  options.reasoningEffort,
+		ExtraBody:        options.extraBody,
 		Reporter:         reporter,
 	})
 	if err != nil {

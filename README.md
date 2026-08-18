@@ -63,6 +63,14 @@ Useful options include:
 - `-v` writes model activity and token usage to stderr.
 - `--reasoning-effort` defaults to `medium`.
 - `--exclude-reasoning` reduces streamed reasoning data when supported.
+- `--extra-body` merges a JSON object into every request body, for provider
+  controls that are not part of the Chat Completions schema - vLLM and SGLang
+  read `chat_template_kwargs`, so
+  `--extra-body '{"chat_template_kwargs":{"enable_thinking":true}}'` is how a
+  Qwen-style model is asked to think. Also settable as `GIT_REVIEW_EXTRA_BODY`.
+  Extra keys override the optional fields the client sets, such as
+  `reasoning_effort`; `model`, `messages`, `tools`, `stream` and
+  `stream_options` are refused.
 - `--stream=false` supports endpoints without streaming.
 - `--timeout`, `--max-steps`, and `--max-response-mib` control resource limits.
 - `--input-price` and `--output-price` estimate cost when the endpoint does not

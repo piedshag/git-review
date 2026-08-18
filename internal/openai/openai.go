@@ -22,6 +22,7 @@ type Config struct {
 	MaxResponseBytes int
 	ExcludeReasoning bool
 	ReasoningEffort  string
+	ExtraBody        map[string]json.RawMessage
 	Reporter         agent.Reporter
 }
 
@@ -34,6 +35,7 @@ type Client struct {
 	maxResponseBytes int
 	excludeReasoning bool
 	reasoningEffort  string
+	extraBody        map[string]json.RawMessage
 	reporter         agent.Reporter
 }
 
@@ -69,6 +71,7 @@ func New(config Config) (*Client, error) {
 		maxResponseBytes: maxResponseBytes,
 		excludeReasoning: config.ExcludeReasoning,
 		reasoningEffort:  config.ReasoningEffort,
+		extraBody:        config.ExtraBody,
 		reporter:         reporter,
 	}, nil
 }
@@ -88,6 +91,10 @@ func (c *Client) Complete(ctx context.Context, messages []agent.Message, tools [
 		body.StreamOptions = &streamOptions{IncludeUsage: true}
 	}
 	payload, err := json.Marshal(body)
+	if err != nil {
+		return message{}, tokenUsage{}, err
+	}
+	payload, err = mergeExtraBody(payload, c.extraBody)
 	if err != nil {
 		return message{}, tokenUsage{}, err
 	}
@@ -150,4 +157,28 @@ func decodeAPIError(resp *http.Response) error {
 		return fmt.Errorf("model API returned HTTP %d: %s", resp.StatusCode, decoded.Error.Message)
 	}
 	return fmt.Errorf("model API returned HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
+}
+
+// mergeExtraBody adds the caller's extra keys to an encoded request body.
+// Merging encoded JSON keeps the request struct as the description of what the
+// client itself sends: provider-specific controls pass through without a field
+// each. Extra keys win over the struct's optional fields (reasoning_effort, for
+// one) so an endpoint that wants a different spelling can be given it; the keys
+// the client owns are refused at flag-parse time, not here.
+func mergeExtraBody(payload []byte, extra map[string]json.RawMessage) ([]byte, error) {
+	if len(extra) == 0 {
+		return payload, nil
+	}
+	var merged map[string]json.RawMessage
+	if err := json.Unmarshal(payload, &merged); err != nil {
+		return nil, fmt.Errorf("decode request body: %w", err)
+	}
+	for key, value := range extra {
+		merged[key] = value
+	}
+	encoded, err := json.Marshal(merged)
+	if err != nil {
+		return nil, fmt.Errorf("encode request body: %w", err)
+	}
+	return encoded, nil
 }
