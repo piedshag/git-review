@@ -58,13 +58,16 @@ type ReviewStats struct {
 }
 
 func submitReviewTool() Tool {
+	// Keep the 4,000-character upper bounds in parseReviewSubmission rather than
+	// the tool schema. Some grammar-backed OpenAI-compatible servers cannot
+	// compile string maxLength values of 2,000 or greater.
 	return Tool{Type: "function", Function: ToolFunction{
 		Name:        submitReviewToolName,
 		Description: "Submit the final code review with a change summary, strengths, weaknesses, and structured findings. Call exactly once after inspection, with an empty findings array when no defects were found.",
 		Parameters: objectSchema(map[string]any{
-			"summary":    map[string]any{"type": "string", "minLength": 20, "maxLength": 4000, "description": "Summarize the changes introduced by the branch and their purpose."},
-			"strengths":  map[string]any{"type": "string", "minLength": 20, "maxLength": 4000, "description": "Explain what the implementation does well. State clearly when no notable strengths were identified."},
-			"weaknesses": map[string]any{"type": "string", "minLength": 20, "maxLength": 4000, "description": "Explain weaknesses, tradeoffs, or remaining concerns. State clearly when none were identified; concrete defects must also appear in findings."},
+			"summary":    map[string]any{"type": "string", "minLength": 20, "description": "Summarize the changes introduced by the branch and their purpose."},
+			"strengths":  map[string]any{"type": "string", "minLength": 20, "description": "Explain what the implementation does well. State clearly when no notable strengths were identified."},
+			"weaknesses": map[string]any{"type": "string", "minLength": 20, "description": "Explain weaknesses, tradeoffs, or remaining concerns. State clearly when none were identified; concrete defects must also appear in findings."},
 			"findings": map[string]any{
 				"type":     "array",
 				"maxItems": 100,
@@ -73,7 +76,7 @@ func submitReviewTool() Tool {
 					"properties": map[string]any{
 						"severity":    map[string]any{"type": "string", "enum": []string{"critical", "high", "medium", "low"}, "description": "Impact severity."},
 						"summary":     map[string]any{"type": "string", "minLength": 3, "maxLength": 80, "description": "A concise summary of at most 12 words."},
-						"explanation": map[string]any{"type": "string", "minLength": 20, "maxLength": 4000, "description": "Detailed explanation of the defect, its impact, and a suggested fix."},
+						"explanation": map[string]any{"type": "string", "minLength": 20, "description": "Detailed explanation of the defect, its impact, and a suggested fix."},
 						"file":        map[string]any{"type": "string", "minLength": 1, "description": "Repository-relative target-branch file path."},
 						"line":        map[string]any{"type": "integer", "minimum": 1, "description": "Relevant target-branch line number."},
 					},
