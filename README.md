@@ -80,8 +80,8 @@ git tag v0.1.0
 git push origin v0.1.0
 ```
 
-GitHub Actions tests the tagged commit, builds Linux, macOS, and Windows
-binaries, generates checksums, and publishes them as a GitHub Release.
+GitHub Actions tests the tagged commit, builds a Linux amd64 binary, generates a
+checksum, and publishes it as a GitHub Release.
 
 ## Parallel focused reviews
 

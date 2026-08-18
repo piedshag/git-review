@@ -40,34 +40,11 @@ jobs:
           version="${GITHUB_REF_NAME#v}"
           mkdir -p dist
 
-          targets=(
-            linux/amd64
-            linux/arm64
-            darwin/amd64
-            darwin/arm64
-            windows/amd64
-          )
-
-          for target in "${targets[@]}"; do
-            goos="${target%/*}"
-            goarch="${target#*/}"
-            archive="git-review_${version}_${goos}_${goarch}"
-            binary="git-review"
-
-            if [[ "${goos}" == "windows" ]]; then
-              binary="git-review.exe"
-            fi
-
-            staging="$(mktemp -d)"
-            CGO_ENABLED=0 GOOS="${goos}" GOARCH="${goarch}" \
-              go build -trimpath -ldflags="-s -w" -o "${staging}/${binary}" .
-
-            if [[ "${goos}" == "windows" ]]; then
-              zip -j "dist/${archive}.zip" "${staging}/${binary}"
-            else
-              tar -czf "dist/${archive}.tar.gz" -C "${staging}" "${binary}"
-            fi
-          done
+          staging="$(mktemp -d)"
+          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
+            go build -trimpath -ldflags="-s -w" -o "${staging}/git-review" .
+          tar -czf "dist/git-review_${version}_linux_amd64.tar.gz" \
+            -C "${staging}" git-review
 
           cd dist
           sha256sum ./* > SHA256SUMS
