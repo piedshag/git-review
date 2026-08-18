@@ -1,0 +1,82 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Validate release tag
+        run: |
+          if [[ ! "${GITHUB_REF_NAME}" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$ ]]; then
+            echo "Release tags must use semantic versioning, for example v1.2.3"
+            exit 1
+          fi
+
+      - name: Test
+        run: |
+          go vet ./...
+          go test ./...
+
+      - name: Build release archives
+        run: |
+          set -euo pipefail
+
+          version="${GITHUB_REF_NAME#v}"
+          mkdir -p dist
+
+          targets=(
+            linux/amd64
+            linux/arm64
+            darwin/amd64
+            darwin/arm64
+            windows/amd64
+          )
+
+          for target in "${targets[@]}"; do
+            goos="${target%/*}"
+            goarch="${target#*/}"
+            archive="git-review_${version}_${goos}_${goarch}"
+            binary="git-review"
+
+            if [[ "${goos}" == "windows" ]]; then
+              binary="git-review.exe"
+            fi
+
+            staging="$(mktemp -d)"
+            CGO_ENABLED=0 GOOS="${goos}" GOARCH="${goarch}" \
+              go build -trimpath -ldflags="-s -w" -o "${staging}/${binary}" .
+
+            if [[ "${goos}" == "windows" ]]; then
+              zip -j "dist/${archive}.zip" "${staging}/${binary}"
+            else
+              tar -czf "dist/${archive}.tar.gz" -C "${staging}" "${binary}"
+            fi
+          done
+
+          cd dist
+          sha256sum ./* > SHA256SUMS
+
+      - name: Publish GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${GITHUB_REF_NAME}" dist/* \
+            --verify-tag \
+            --generate-notes \
+            --title "${GITHUB_REF_NAME}"
