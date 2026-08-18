@@ -80,3 +80,34 @@ func TestParseOptionsDefaultsToThirtySteps(t *testing.T) {
 		t.Fatalf("max steps=%d, want 30", options.maxSteps)
 	}
 }
+
+func TestParseOptionsAcceptsExtraBody(t *testing.T) {
+	t.Setenv("GIT_REVIEW_EXTRA_BODY", "")
+	options, err := parseOptions([]string{"feature", "--extra-body", `{"chat_template_kwargs":{"enable_thinking":true}}`}, io.Discard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := string(options.extraBody["chat_template_kwargs"]); got != `{"enable_thinking":true}` {
+		t.Fatalf("extra body=%v", options.extraBody)
+	}
+}
+
+func TestParseOptionsRejectsBadExtraBody(t *testing.T) {
+	t.Setenv("GIT_REVIEW_EXTRA_BODY", "")
+	for _, value := range []string{`[1,2]`, `{"messages":[]}`, `{`} {
+		if _, err := parseOptions([]string{"feature", "--extra-body", value}, io.Discard); err == nil {
+			t.Fatalf("extra body %q was accepted", value)
+		}
+	}
+}
+
+func TestExtraBodyDefaultsToTheEnvironment(t *testing.T) {
+	t.Setenv("GIT_REVIEW_EXTRA_BODY", `{"chat_template_kwargs":{"enable_thinking":true}}`)
+	options, err := parseOptions([]string{"feature"}, io.Discard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(options.extraBody) != 1 {
+		t.Fatalf("extra body=%v", options.extraBody)
+	}
+}

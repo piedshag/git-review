@@ -200,3 +200,41 @@ func (fn roundTripFunc) RoundTrip(request *http.Request) (*http.Response, error)
 func jsonResponse(body string) *http.Response {
 	return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(body))}
 }
+
+func TestExtraBodyReachesTheWireAndOverridesOptionalFields(t *testing.T) {
+	transport := roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		var body map[string]json.RawMessage
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatal(err)
+		}
+		if got := string(body["chat_template_kwargs"]); got != `{"enable_thinking":true}` {
+			t.Fatalf("chat_template_kwargs=%s", got)
+		}
+		if got := string(body["reasoning_effort"]); got != `"high"` {
+			t.Fatalf("extra body did not override reasoning_effort: %s", got)
+		}
+		if got := string(body["model"]); got != `"test-model"` {
+			t.Fatalf("client-owned field was lost: %s", got)
+		}
+		return jsonResponse(`{"choices":[{"message":{"role":"assistant","content":"done"}}]}`), nil
+	})
+	extra := map[string]json.RawMessage{
+		"chat_template_kwargs": json.RawMessage(`{"enable_thinking":true}`),
+		"reasoning_effort":     json.RawMessage(`"high"`),
+	}
+	client := makeOpenAIClient(t, Config{Endpoint: "http://model.test/v1", Model: "test-model", ReasoningEffort: "medium", ExtraBody: extra}, transport)
+	if _, _, err := client.Complete(t.Context(), []message{{Role: "user", Content: "review"}}, nil); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestNoExtraBodyLeavesThePayloadUntouched(t *testing.T) {
+	payload := []byte(`{"model":"test-model"}`)
+	merged, err := mergeExtraBody(payload, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(merged, payload) {
+		t.Fatalf("payload was rewritten: %s", merged)
+	}
+}
