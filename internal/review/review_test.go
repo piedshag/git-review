@@ -27,6 +27,25 @@ func TestSubmitReviewToolSchemaRequiresStructuredFindings(t *testing.T) {
 	}
 }
 
+func TestSubmitReviewToolSchemaAvoidsLargeStringMaxLengths(t *testing.T) {
+	tool := submitReviewTool()
+	var inspect func(string, map[string]any)
+	inspect = func(path string, schema map[string]any) {
+		if maximum, ok := schema["maxLength"].(int); ok && maximum >= 2000 {
+			t.Errorf("%s has grammar-incompatible maxLength %d", path, maximum)
+		}
+		if properties, ok := schema["properties"].(map[string]any); ok {
+			for name, property := range properties {
+				inspect(path+"."+name, property.(map[string]any))
+			}
+		}
+		if items, ok := schema["items"].(map[string]any); ok {
+			inspect(path+"[]", items)
+		}
+	}
+	inspect(submitReviewToolName, tool.Function.Parameters)
+}
+
 func TestParseAndRenderReview(t *testing.T) {
 	submission, err := parseReviewSubmission(reviewArguments(`[
 			{"severity":"low","summary":"  Handle empty response  ","explanation":"An empty response currently causes an ambiguous result; return a clear error instead.","file":"client.go","line":42},
