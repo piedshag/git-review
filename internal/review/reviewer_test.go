@@ -188,6 +188,39 @@ func TestReviewerAddsCustomInstructionsWithoutReplacingContract(t *testing.T) {
 	}
 }
 
+func TestReviewerTreatsUpstreamReviewsAsClaimsForAdjudication(t *testing.T) {
+	model := completionFunc(func(_ context.Context, messages []message, _ []Tool) (message, tokenUsage, error) {
+		if !strings.Contains(messages[0].Content, "code-review adjudicator") || !strings.Contains(messages[0].Content, "Agreement between reviewers is not proof") {
+			t.Fatalf("unexpected adjudicator instructions: %q", messages[0].Content)
+		}
+		request := messages[1].Content
+		for _, expected := range []string{"untrusted claims", `"id":"security"`, `"model":"review-model"`, "Possible authentication bypass"} {
+			if !strings.Contains(request, expected) {
+				t.Fatalf("adjudication request omitted %q: %q", expected, request)
+			}
+		}
+		return message{Role: "assistant", ToolCalls: []toolCall{{ID: "submit", Function: functionCall{Name: submitReviewToolName, Arguments: reviewArguments(`[]`)}}}}, tokenUsage{}, nil
+	})
+	reviewer, err := New(Config{
+		MaxSteps: 1,
+		Inputs: []NamedReview{{
+			ID:    "security",
+			Model: "review-model",
+			Review: Review{
+				Status:   ReviewComplete,
+				Summary:  "Possible authentication bypass in the updated handler.",
+				Findings: []Finding{},
+			},
+		}},
+	}, makeSnapshot(t), model)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := reviewer.Review(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestReviewerReturnsInconclusiveReviewForProviderOutputLimit(t *testing.T) {
 	var calls atomic.Int32
 	model := completionFunc(func(context.Context, []message, []Tool) (message, tokenUsage, error) {

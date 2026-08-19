@@ -8,9 +8,9 @@ import (
 	"os"
 
 	"github.com/piedshag/git-review/internal/gitrepo"
-	"github.com/piedshag/git-review/internal/openai"
 	"github.com/piedshag/git-review/internal/report"
 	reviewpkg "github.com/piedshag/git-review/internal/review"
+	"github.com/piedshag/git-review/internal/reviewapp"
 )
 
 func main() {
@@ -37,7 +37,10 @@ func run() error {
 		return err
 	}
 	reporter := report.New(os.Stderr, options.verbose, options.debugModelOutput, terminalOutput(os.Stderr))
-	model, err := openai.New(openai.Config{
+
+	ctx, cancel := context.WithTimeout(context.Background(), options.timeout)
+	defer cancel()
+	review, err := reviewapp.Run(ctx, snapshot, reviewapp.Config{
 		Endpoint:         options.endpoint,
 		APIKey:           os.Getenv("OPENAI_API_KEY"),
 		Model:            options.model,
@@ -46,25 +49,12 @@ func run() error {
 		ExcludeReasoning: options.excludeReasoning,
 		ReasoningEffort:  options.reasoningEffort,
 		ExtraBody:        options.extraBody,
+		MaxSteps:         options.maxSteps,
+		Instructions:     instructions,
+		InputPrice:       options.inputPrice,
+		OutputPrice:      options.outputPrice,
 		Reporter:         reporter,
 	})
-	if err != nil {
-		return err
-	}
-	reviewer, err := reviewpkg.New(reviewpkg.Config{
-		MaxSteps:     options.maxSteps,
-		Instructions: instructions,
-		InputPrice:   options.inputPrice,
-		OutputPrice:  options.outputPrice,
-		Reporter:     reporter,
-	}, snapshot, model)
-	if err != nil {
-		return err
-	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), options.timeout)
-	defer cancel()
-	review, err := reviewer.Review(ctx)
 	if err != nil {
 		return err
 	}

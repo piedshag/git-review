@@ -12,6 +12,7 @@ structured JSON with validated findings and severity levels.
 
 ```sh
 go build -o git-review .
+go build -o git-review-run ./cmd/git-review-run
 
 OPENAI_API_KEY=... ./git-review --base main feature/my-change
 ```
@@ -88,13 +89,47 @@ git tag v0.1.0
 git push origin v0.1.0
 ```
 
-GitHub Actions tests the tagged commit, builds a Linux amd64 binary, generates a
-checksum, and publishes it as a GitHub Release.
+GitHub Actions tests the tagged commit, builds the Linux amd64 binaries,
+generates a checksum, and publishes them as a GitHub Release.
 
-## Parallel focused reviews
+## Composable multi-agent reviews
+
+`git-review-run` reads a small agent graph from `.git-review.toml`. Agents with
+no inputs review the same resolved Git snapshot concurrently. Agents with
+inputs act as judges: they receive the named upstream reviews as untrusted
+claims and can use the same read-only Git tools to verify and consolidate them.
+
+Start with the included example:
+
+```sh
+cp .git-review.example.toml .git-review.toml
+./git-review-run --base main feature/my-change >review.md
+./git-review-run --format json --base main feature/my-change >review-run.json
+```
+
+Each `[[agent]]` can override `model`, `endpoint`, `reasoning_effort`,
+`timeout`, instructions, and the other bounded review settings. Instruction
+files are resolved relative to the TOML file. The top-level `output` selects
+the review rendered as Markdown; JSON retains every node result, its inputs,
+model, errors, and the resolved base and target commit hashes.
+
+Provider-specific request fields can be inherited from
+`GIT_REVIEW_EXTRA_BODY` or set per agent as a JSON string in `extra_body`.
+
+The graph is composable: a node without `inputs` is an independent reviewer,
+while a node with `inputs` adjudicates those reviews and emits the same
+validated review type. Cycles, duplicate IDs, and missing inputs are rejected
+before any model request is made.
+
+Progress is always written to stderr. Interactive runs show coarse per-agent
+lifecycle events. `-v` adds model and tool activity prefixed by agent ID; CI
+and redirected runs remain quiet by default.
+
+## Fixed parallel review script
 
 `review-parallel.sh` runs three reviewers concurrently, focused on security,
-code quality, and general correctness:
+code quality, and general correctness. It remains available as a lightweight
+shell alternative to the configurable runner:
 
 ```sh
 ./review-parallel.sh --base main feature/my-change >review.md
@@ -131,5 +166,7 @@ the repository's `.git` object database.
 - `internal/agent` defines model, tool, usage, and reporting contracts.
 - `internal/gitrepo` provides bounded read-only Git operations.
 - `internal/openai` implements the Chat Completions transport.
+- `internal/pipeline` loads and executes composable multi-agent review graphs.
 - `internal/review` owns the review loop, validation, limits, and output formats.
+- `internal/reviewapp` is the shared application service used by both binaries.
 - `internal/report` renders progress and verbose logs.
