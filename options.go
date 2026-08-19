@@ -11,6 +11,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/piedshag/git-review/internal/cli"
+	"github.com/piedshag/git-review/internal/openai"
 	reviewpkg "github.com/piedshag/git-review/internal/review"
 )
 
@@ -146,23 +148,7 @@ func parseOptions(arguments []string, output io.Writer) (options, error) {
 // without a field per provider. Keys the client owns are rejected rather than
 // silently overridden, so a typo cannot replace the messages or the tools.
 func parseExtraBody(value string) (map[string]json.RawMessage, error) {
-	trimmed := strings.TrimSpace(value)
-	if trimmed == "" {
-		return nil, nil
-	}
-	var extra map[string]json.RawMessage
-	if err := json.Unmarshal([]byte(trimmed), &extra); err != nil {
-		return nil, fmt.Errorf("extra-body must be a JSON object: %w", err)
-	}
-	if len(extra) == 0 {
-		return nil, nil
-	}
-	for _, reserved := range []string{"model", "messages", "tools", "stream", "stream_options"} {
-		if _, found := extra[reserved]; found {
-			return nil, fmt.Errorf("extra-body cannot set %q", reserved)
-		}
-	}
-	return extra, nil
+	return openai.ParseExtraBody(value)
 }
 
 func validReasoningEffort(value string) bool {
@@ -174,47 +160,10 @@ func validReasoningEffort(value string) bool {
 	}
 }
 
-type boolFlag interface {
-	IsBoolFlag() bool
-}
-
 // parseInterspersed lets flags appear before or after the branch. The standard
 // flag package stops parsing at the first positional argument.
 func parseInterspersed(fs *flag.FlagSet, arguments []string) error {
-	flags := make([]string, 0, len(arguments))
-	positionals := make([]string, 0, 1)
-	for i := 0; i < len(arguments); i++ {
-		argument := arguments[i]
-		if argument == "--" {
-			positionals = append(positionals, arguments[i+1:]...)
-			break
-		}
-		if argument == "-" || !strings.HasPrefix(argument, "-") {
-			positionals = append(positionals, argument)
-			continue
-		}
-
-		flags = append(flags, argument)
-		name := strings.TrimLeft(argument, "-")
-		if before, _, found := strings.Cut(name, "="); found {
-			name = before
-			continue
-		}
-		definition := fs.Lookup(name)
-		if definition == nil {
-			continue
-		}
-		if boolean, ok := definition.Value.(boolFlag); ok && boolean.IsBoolFlag() {
-			continue
-		}
-		if i+1 < len(arguments) {
-			i++
-			flags = append(flags, arguments[i])
-		}
-	}
-	normalized := append(flags, "--")
-	normalized = append(normalized, positionals...)
-	return fs.Parse(normalized)
+	return cli.ParseInterspersed(fs, arguments)
 }
 
 func terminalOutput(file *os.File) bool {

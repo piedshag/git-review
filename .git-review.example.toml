@@ -1,0 +1,33 @@
+version = 1
+output = "final"
+
+[defaults]
+reasoning_effort = "medium"
+timeout = "10m"
+
+[[agent]]
+id = "security"
+instructions = """
+Focus on authentication, authorization, injection, unsafe input handling,
+secret exposure, path traversal, denial of service, and trust boundaries.
+"""
+
+[[agent]]
+id = "correctness"
+instructions = """
+Focus on logic errors, regressions, edge cases, incorrect API behavior,
+data loss, and compatibility problems in realistic execution paths.
+"""
+
+[[agent]]
+id = "simplicity"
+instructions = """
+Focus on concurrency hazards, resource leaks, broken abstractions, and
+complexity likely to cause operational defects. Ignore cosmetic style.
+"""
+
+[[agent]]
+id = "final"
+inputs = ["security", "correctness", "simplicity"]
+reasoning_effort = "high"
+instructions = "Verify every material claim against the repository before retaining it."

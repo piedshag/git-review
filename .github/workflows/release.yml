@@ -43,8 +43,10 @@ jobs:
           staging="$(mktemp -d)"
           CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
             go build -trimpath -ldflags="-s -w" -o "${staging}/git-review" .
+          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
+            go build -trimpath -ldflags="-s -w" -o "${staging}/git-review-run" ./cmd/git-review-run
           tar -czf "dist/git-review_${version}_linux_amd64.tar.gz" \
-            -C "${staging}" git-review
+            -C "${staging}" git-review git-review-run
 
           cd dist
           sha256sum ./* > SHA256SUMS

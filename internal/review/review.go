@@ -30,6 +30,15 @@ type Review struct {
 	Stats      ReviewStats  `json:"stats"`
 }
 
+// NamedReview identifies an upstream review supplied to an adjudicating
+// reviewer. The review remains a claim until the adjudicator verifies it
+// against the repository snapshot.
+type NamedReview struct {
+	ID     string `json:"id"`
+	Model  string `json:"model,omitempty"`
+	Review Review `json:"review"`
+}
+
 type submittedReview struct {
 	Summary    string
 	Strengths  string

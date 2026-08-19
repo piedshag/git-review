@@ -36,6 +36,13 @@ type Snapshot struct {
 	targetName string
 }
 
+type Identity struct {
+	BaseName   string `json:"base_name"`
+	BaseHash   string `json:"base_hash"`
+	TargetName string `json:"target_name"`
+	TargetHash string `json:"target_hash"`
+}
+
 func Open(repoPath, baseRevision, targetRevision string) (*Snapshot, error) {
 	repo, err := git.PlainOpenWithOptions(repoPath, &git.PlainOpenOptions{DetectDotGit: true})
 	if err != nil {
@@ -98,6 +105,15 @@ func resolveCommit(repo *git.Repository, revision string) (*object.Commit, error
 
 func (s *Snapshot) Description() string {
 	return fmt.Sprintf("target %s (%s), base %s at merge-base (%s)", s.targetName, s.target.Hash, s.baseName, s.base.Hash)
+}
+
+func (s *Snapshot) Identity() Identity {
+	return Identity{
+		BaseName:   s.baseName,
+		BaseHash:   s.base.Hash.String(),
+		TargetName: s.targetName,
+		TargetHash: s.target.Hash.String(),
+	}
 }
 
 func (s *Snapshot) Tools() []agent.Tool {
