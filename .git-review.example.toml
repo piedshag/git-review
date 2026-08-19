@@ -7,6 +7,8 @@ timeout = "10m"
 
 [[agent]]
 id = "security"
+# To keep instructions in a separate file, replace `instructions` with:
+# instructions_file = ".git-review/security.md"
 instructions = """
 Focus on authentication, authorization, injection, unsafe input handling,
 secret exposure, path traversal, denial of service, and trust boundaries.

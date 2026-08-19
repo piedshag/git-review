@@ -107,14 +107,69 @@ cp .git-review.example.toml .git-review.toml
 ./git-review-run --format json --base main feature/my-change >review-run.json
 ```
 
-Each `[[agent]]` can override `model`, `endpoint`, `reasoning_effort`,
-`timeout`, instructions, and the other bounded review settings. Instruction
-files are resolved relative to the TOML file. The top-level `output` selects
-the review rendered as Markdown; JSON retains every node result, its inputs,
-model, errors, and the resolved base and target commit hashes.
+### Runner configuration
 
-Provider-specific request fields can be inherited from
-`GIT_REVIEW_EXTRA_BODY` or set per agent as a JSON string in `extra_body`.
+The top level accepts these keys:
+
+| Key | Required | Meaning |
+| --- | --- | --- |
+| `version` | Yes | Configuration schema version. The only supported value is `1`. |
+| `output` | Usually | ID of the agent rendered as Markdown. It may be omitted when the graph has exactly one sink. |
+
+Put shared settings in `[defaults]` and override them in any `[[agent]]`.
+Agent settings take precedence over defaults, which take precedence over the
+environment and built-in values.
+
+| Key | Default | Meaning |
+| --- | --- | --- |
+| `model` | `OPENAI_MODEL`, then `gpt-5` | Model name for this agent. |
+| `endpoint` | `OPENAI_BASE_URL`, then `https://api.openai.com/v1` | OpenAI-compatible API base URL. |
+| `reasoning_effort` | `medium` | `none`, `minimal`, `low`, `medium`, `high`, `xhigh`, or `max`. |
+| `extra_body` | `GIT_REVIEW_EXTRA_BODY` | JSON object encoded as a TOML string and merged into provider requests. Core request fields cannot be replaced. |
+| `timeout` | `10m` | Go duration limiting this agent, such as `90s` or `15m`. |
+| `max_steps` | `30` | Maximum model/tool turns, from 1 to 100. |
+| `stream` | `true` | Whether to request streaming Chat Completions responses. |
+| `max_response_mib` | `64` | Maximum response size per turn, from 1 to 1024 MiB. |
+| `exclude_reasoning` | `false` | Ask compatible providers not to return reasoning text. |
+| `input_price` | `0` | Input price in US dollars per million tokens, used for cost estimates. |
+| `output_price` | `0` | Output price in US dollars per million tokens, used for cost estimates. |
+| `instructions` | Empty | Inline additional instructions. TOML multiline strings are supported. |
+| `instructions_file` | Empty | File containing additional instructions. Mutually exclusive with `instructions` in the same section. |
+
+Instruction-file paths are resolved relative to the TOML file, may be absolute,
+and are limited to 1 MiB. Stdin (`-`) is intentionally unsupported because
+agents run concurrently. Instructions from `[defaults]` are applied to every
+agent; each agent's own instructions or instruction file is appended to them.
+
+```toml
+[defaults]
+instructions_file = ".git-review/common.md"
+
+[[agent]]
+id = "security"
+model = "security-model"
+instructions_file = ".git-review/security.md"
+```
+
+Every `[[agent]]` also supports:
+
+| Key | Required | Meaning |
+| --- | --- | --- |
+| `id` | Yes | Unique ID of at most 64 characters, beginning with a letter and containing only letters, digits, `_`, or `-`. |
+| `inputs` | No | IDs of upstream reviews to adjudicate. An agent without inputs performs an independent review. |
+
+A configuration may contain up to 32 agents. Duplicate IDs, unknown inputs,
+cycles, unknown configuration keys, and invalid option values are rejected
+before any model request is made. API credentials are not stored in TOML; all
+agents currently use `OPENAI_API_KEY`.
+
+The top-level `output` selects the review rendered as Markdown. JSON retains
+every node result, its inputs, model, errors, and the resolved base and target
+commit hashes.
+
+The runner command supports `--config`, `--repo`, `--base`, `--format`, `-v`,
+and `--debug-model-output`. Run `git-review-run -h` for their defaults and full
+descriptions.
 
 The graph is composable: a node without `inputs` is an independent reviewer,
 while a node with `inputs` adjudicates those reviews and emits the same
