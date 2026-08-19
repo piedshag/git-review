@@ -125,21 +125,6 @@ Progress is always written to stderr. Interactive runs show coarse per-agent
 lifecycle events. `-v` adds model and tool activity prefixed by agent ID; CI
 and redirected runs remain quiet by default.
 
-## Fixed parallel review script
-
-`review-parallel.sh` runs three reviewers concurrently, focused on security,
-code quality, and general correctness. It remains available as a lightweight
-shell alternative to the configurable runner:
-
-```sh
-./review-parallel.sh --base main feature/my-change >review.md
-./review-parallel.sh --format json --base main feature/my-change >review.json
-```
-
-Use `--binary PATH` or `GIT_REVIEW_BIN` when the executable is elsewhere. The
-script runs three independent model conversations, so expect roughly three
-times the token usage and cost of a single review.
-
 ## Review behavior
 
 The model must finish by calling a validated `submit_review` tool. A review
