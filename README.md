@@ -176,15 +176,26 @@ while a node with `inputs` adjudicates those reviews and emits the same
 validated review type. Cycles, duplicate IDs, and missing inputs are rejected
 before any model request is made.
 
+Independent findings receive stable IDs such as `security:1`. Judges use a
+separate `submit_judgment` tool and must cite every upstream finding they
+consolidate. The runner validates those IDs and resolves them to trusted agent
+and model metadata; models never provide their own attribution. Markdown labels
+each final finding with its reporting agents and models, while JSON preserves
+the exact source finding IDs. Provenance is carried through additional judge
+stages, and a finding discovered by a judge is attributed to that judge. Run
+artifacts containing finding provenance use `schema_version: 2`.
+
 Progress is always written to stderr. Interactive runs show coarse per-agent
 lifecycle events. `-v` adds model and tool activity prefixed by agent ID; CI
 and redirected runs remain quiet by default.
 
 ## Review behavior
 
-The model must finish by calling a validated `submit_review` tool. A review
-contains a change summary, strengths, weaknesses, and findings with severity,
-explanation, file, and line information.
+Independent reviewers must finish by calling the validated `submit_review`
+tool; judges finish with `submit_judgment`, which additionally requires source
+finding IDs. Both produce the same review artifact containing a change summary,
+strengths, weaknesses, and findings with severity, explanation, file, and line
+information.
 
 Responses stream by default. The CLI bounds reads, model responses, tool turns,
 and total review time. It reserves time for a final submission and makes one

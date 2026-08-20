@@ -20,6 +20,9 @@ func TestReviewerExecutesToolsAndReturnsStructuredReview(t *testing.T) {
 		if len(tools) != 6 {
 			t.Fatalf("got %d tools", len(tools))
 		}
+		if tools[5].Function.Name != submitReviewToolName {
+			t.Fatalf("reviewer received unexpected terminal tool: %+v", tools[5])
+		}
 		if calls.Add(1) == 1 {
 			return message{Role: "assistant", ToolCalls: []toolCall{{ID: "stat", Type: "function", Function: functionCall{Name: "stat", Arguments: `{}`}}}}, tokenUsage{PromptTokens: 100, CompletionTokens: 10, TotalTokens: 110, Cost: floatPointer(0.001)}, nil
 		}
@@ -189,7 +192,10 @@ func TestReviewerAddsCustomInstructionsWithoutReplacingContract(t *testing.T) {
 }
 
 func TestReviewerTreatsUpstreamReviewsAsClaimsForAdjudication(t *testing.T) {
-	model := completionFunc(func(_ context.Context, messages []message, _ []Tool) (message, tokenUsage, error) {
+	model := completionFunc(func(_ context.Context, messages []message, tools []Tool) (message, tokenUsage, error) {
+		if len(tools) != 6 || tools[5].Function.Name != submitJudgmentToolName {
+			t.Fatalf("judge received unexpected tools: %+v", tools)
+		}
 		if !strings.Contains(messages[0].Content, "code-review adjudicator") || !strings.Contains(messages[0].Content, "Agreement between reviewers is not proof") {
 			t.Fatalf("unexpected adjudicator instructions: %q", messages[0].Content)
 		}
@@ -199,7 +205,7 @@ func TestReviewerTreatsUpstreamReviewsAsClaimsForAdjudication(t *testing.T) {
 				t.Fatalf("adjudication request omitted %q: %q", expected, request)
 			}
 		}
-		return message{Role: "assistant", ToolCalls: []toolCall{{ID: "submit", Function: functionCall{Name: submitReviewToolName, Arguments: reviewArguments(`[]`)}}}}, tokenUsage{}, nil
+		return message{Role: "assistant", ToolCalls: []toolCall{{ID: "submit", Function: functionCall{Name: submitJudgmentToolName, Arguments: reviewArguments(`[]`)}}}}, tokenUsage{}, nil
 	})
 	reviewer, err := New(Config{
 		MaxSteps: 1,
@@ -216,8 +222,52 @@ func TestReviewerTreatsUpstreamReviewsAsClaimsForAdjudication(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := reviewer.Review(t.Context()); err != nil {
+	result, err := reviewer.Review(t.Context())
+	if err != nil {
 		t.Fatal(err)
+	}
+	if result.Status != ReviewComplete {
+		t.Fatalf("judge did not complete: %+v", result)
+	}
+}
+
+func TestReviewerRejectsUnknownJudgmentSourceAndRequestsResubmission(t *testing.T) {
+	var calls atomic.Int32
+	model := completionFunc(func(_ context.Context, messages []message, _ []Tool) (message, tokenUsage, error) {
+		if calls.Add(1) == 1 {
+			return message{Role: "assistant", ToolCalls: []toolCall{{ID: "bad", Function: functionCall{
+				Name:      submitJudgmentToolName,
+				Arguments: reviewArguments(`[{"severity":"high","summary":"Authorization can be bypassed","explanation":"The updated handler skips the required authorization check for delegated requests.","file":"auth.go","line":42,"source_finding_ids":["invented:1"]}]`),
+			}}}}, tokenUsage{}, nil
+		}
+		validationFound := false
+		for _, candidate := range messages {
+			validationFound = validationFound || candidate.Role == "tool" && strings.Contains(candidate.Content, "unknown source finding id")
+		}
+		if !validationFound {
+			t.Fatalf("judge did not receive source validation error: %+v", messages)
+		}
+		return message{Role: "assistant", ToolCalls: []toolCall{{ID: "good", Function: functionCall{
+			Name:      submitJudgmentToolName,
+			Arguments: reviewArguments(`[{"severity":"high","summary":"Authorization can be bypassed","explanation":"The updated handler skips the required authorization check for delegated requests.","file":"auth.go","line":42,"source_finding_ids":["security:1"]}]`),
+		}}}}, tokenUsage{}, nil
+	})
+	reviewer, err := New(Config{
+		MaxSteps: 2,
+		Inputs: []NamedReview{{ID: "security", Model: "security-model", Review: Review{Findings: []Finding{{
+			ID: "security:1", Severity: "high", Summary: "Authorization can be bypassed",
+			Explanation: "The updated handler skips the required authorization check for delegated requests.", File: "auth.go", Line: 42,
+		}}}}},
+	}, makeSnapshot(t), model)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := reviewer.Review(t.Context())
+	if err != nil || result.Status != ReviewComplete || calls.Load() != 2 {
+		t.Fatalf("review=%+v calls=%d err=%v", result, calls.Load(), err)
+	}
+	if sources := result.Findings[0].Sources; len(sources) != 1 || sources[0].Model != "security-model" {
+		t.Fatalf("unexpected finding sources: %+v", sources)
 	}
 }
 

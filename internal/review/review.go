@@ -11,7 +11,10 @@ import (
 	"unicode/utf8"
 )
 
-const submitReviewToolName = "submit_review"
+const (
+	submitReviewToolName   = "submit_review"
+	submitJudgmentToolName = "submit_judgment"
+)
 
 type ReviewStatus string
 
@@ -47,11 +50,28 @@ type submittedReview struct {
 }
 
 type Finding struct {
-	Severity    string `json:"severity"`
-	Summary     string `json:"summary"`
-	Explanation string `json:"explanation"`
-	File        string `json:"file"`
-	Line        int    `json:"line"`
+	ID          string          `json:"id,omitempty"`
+	Severity    string          `json:"severity"`
+	Summary     string          `json:"summary"`
+	Explanation string          `json:"explanation"`
+	File        string          `json:"file"`
+	Line        int             `json:"line"`
+	Sources     []FindingSource `json:"sources,omitempty"`
+}
+
+type FindingSource struct {
+	FindingID string `json:"finding_id"`
+	Agent     string `json:"agent"`
+	Model     string `json:"model"`
+}
+
+type submittedFinding struct {
+	Severity         string          `json:"severity"`
+	Summary          string          `json:"summary"`
+	Explanation      string          `json:"explanation"`
+	File             string          `json:"file"`
+	Line             int             `json:"line"`
+	SourceFindingIDs json.RawMessage `json:"source_finding_ids"`
 }
 
 type ReviewStats struct {
@@ -67,12 +87,40 @@ type ReviewStats struct {
 }
 
 func submitReviewTool() Tool {
+	return submissionTool(false)
+}
+
+func submitJudgmentTool() Tool {
+	return submissionTool(true)
+}
+
+func submissionTool(judging bool) Tool {
 	// Keep the 4,000-character upper bounds in parseReviewSubmission rather than
 	// the tool schema. Some grammar-backed OpenAI-compatible servers cannot
 	// compile string maxLength values of 2,000 or greater.
+	name := submitReviewToolName
+	description := "Submit the final code review with a change summary, strengths, weaknesses, and structured findings. Call exactly once after inspection, with an empty findings array when no defects were found."
+	findingProperties := map[string]any{
+		"severity":    map[string]any{"type": "string", "enum": []string{"critical", "high", "medium", "low"}, "description": "Impact severity."},
+		"summary":     map[string]any{"type": "string", "minLength": 3, "maxLength": 80, "description": "A concise summary of at most 12 words."},
+		"explanation": map[string]any{"type": "string", "minLength": 20, "description": "Detailed explanation of the defect, its impact, and a suggested fix."},
+		"file":        map[string]any{"type": "string", "minLength": 1, "description": "Repository-relative target-branch file path."},
+		"line":        map[string]any{"type": "integer", "minimum": 1, "description": "Relevant target-branch line number."},
+	}
+	requiredFindingFields := []string{"severity", "summary", "explanation", "file", "line"}
+	if judging {
+		name = submitJudgmentToolName
+		description = "Submit the final adjudicated review. Verify upstream claims, consolidate equivalent findings, and cite every upstream finding that contributed to each result. Call exactly once, with an empty findings array when no defects survive verification."
+		findingProperties["source_finding_ids"] = map[string]any{
+			"type": "array", "maxItems": 100,
+			"items":       map[string]any{"type": "string", "minLength": 1},
+			"description": "IDs of every equivalent upstream finding consolidated into this finding. Use an empty array only for a defect discovered independently during adjudication.",
+		}
+		requiredFindingFields = append(requiredFindingFields, "source_finding_ids")
+	}
 	return Tool{Type: "function", Function: ToolFunction{
-		Name:        submitReviewToolName,
-		Description: "Submit the final code review with a change summary, strengths, weaknesses, and structured findings. Call exactly once after inspection, with an empty findings array when no defects were found.",
+		Name:        name,
+		Description: description,
 		Parameters: objectSchema(map[string]any{
 			"summary":    map[string]any{"type": "string", "minLength": 20, "description": "Summarize the changes introduced by the branch and their purpose."},
 			"strengths":  map[string]any{"type": "string", "minLength": 20, "description": "Explain what the implementation does well. State clearly when no notable strengths were identified."},
@@ -81,15 +129,9 @@ func submitReviewTool() Tool {
 				"type":     "array",
 				"maxItems": 100,
 				"items": map[string]any{
-					"type": "object",
-					"properties": map[string]any{
-						"severity":    map[string]any{"type": "string", "enum": []string{"critical", "high", "medium", "low"}, "description": "Impact severity."},
-						"summary":     map[string]any{"type": "string", "minLength": 3, "maxLength": 80, "description": "A concise summary of at most 12 words."},
-						"explanation": map[string]any{"type": "string", "minLength": 20, "description": "Detailed explanation of the defect, its impact, and a suggested fix."},
-						"file":        map[string]any{"type": "string", "minLength": 1, "description": "Repository-relative target-branch file path."},
-						"line":        map[string]any{"type": "integer", "minimum": 1, "description": "Relevant target-branch line number."},
-					},
-					"required":             []string{"severity", "summary", "explanation", "file", "line"},
+					"type":                 "object",
+					"properties":           findingProperties,
+					"required":             requiredFindingFields,
 					"additionalProperties": false,
 				},
 			},
@@ -98,6 +140,14 @@ func submitReviewTool() Tool {
 }
 
 func parseReviewSubmission(arguments string) (submittedReview, error) {
+	return parseSubmission(arguments, nil, false)
+}
+
+func parseJudgmentSubmission(arguments string, inputs []NamedReview) (submittedReview, error) {
+	return parseSubmission(arguments, inputs, true)
+}
+
+func parseSubmission(arguments string, inputs []NamedReview, judging bool) (submittedReview, error) {
 	var fields map[string]json.RawMessage
 	if err := json.Unmarshal([]byte(arguments), &fields); err != nil {
 		return submittedReview{}, fmt.Errorf("invalid JSON: %w", err)
@@ -147,13 +197,38 @@ func parseReviewSubmission(arguments string) (submittedReview, error) {
 		return submittedReview{}, errors.New("findings cannot contain more than 100 items")
 	}
 	submission.Findings = make([]Finding, len(rawItems))
+	sourceIndex, err := indexFindingSources(inputs)
+	if err != nil {
+		return submittedReview{}, err
+	}
 	for i, rawItem := range rawItems {
+		var submitted submittedFinding
 		decoder := json.NewDecoder(strings.NewReader(string(rawItem)))
 		decoder.DisallowUnknownFields()
-		if err := decoder.Decode(&submission.Findings[i]); err != nil {
+		if err := decoder.Decode(&submitted); err != nil {
 			return submittedReview{}, fmt.Errorf("finding %d: invalid fields: %w", i+1, err)
 		}
+		if !judging && submitted.SourceFindingIDs != nil {
+			return submittedReview{}, fmt.Errorf("finding %d: source_finding_ids is only allowed in judgments", i+1)
+		}
+		var sourceIDs []string
+		if judging {
+			if submitted.SourceFindingIDs == nil {
+				return submittedReview{}, fmt.Errorf("finding %d: source_finding_ids is required", i+1)
+			}
+			if err := json.Unmarshal(submitted.SourceFindingIDs, &sourceIDs); err != nil || sourceIDs == nil {
+				return submittedReview{}, fmt.Errorf("finding %d: source_finding_ids must be an array", i+1)
+			}
+			if len(sourceIDs) > 100 {
+				return submittedReview{}, fmt.Errorf("finding %d: source_finding_ids cannot contain more than 100 items", i+1)
+			}
+		}
 		finding := &submission.Findings[i]
+		finding.Severity = submitted.Severity
+		finding.Summary = submitted.Summary
+		finding.Explanation = submitted.Explanation
+		finding.File = submitted.File
+		finding.Line = submitted.Line
 		finding.Severity = strings.ToLower(strings.TrimSpace(finding.Severity))
 		finding.Summary = strings.Join(strings.Fields(finding.Summary), " ")
 		finding.Explanation = strings.TrimSpace(finding.Explanation)
@@ -161,8 +236,61 @@ func parseReviewSubmission(arguments string) (submittedReview, error) {
 		if err := validateFinding(*finding); err != nil {
 			return submittedReview{}, fmt.Errorf("finding %d: %w", i+1, err)
 		}
+		if judging {
+			finding.Sources, err = resolveFindingSources(sourceIDs, sourceIndex)
+			if err != nil {
+				return submittedReview{}, fmt.Errorf("finding %d: %w", i+1, err)
+			}
+		}
 	}
 	return submission, nil
+}
+
+func indexFindingSources(inputs []NamedReview) (map[string][]FindingSource, error) {
+	index := make(map[string][]FindingSource)
+	for _, input := range inputs {
+		for position, finding := range input.Review.Findings {
+			if strings.TrimSpace(finding.ID) == "" {
+				return nil, fmt.Errorf("upstream review %q finding %d has no id", input.ID, position+1)
+			}
+			if _, exists := index[finding.ID]; exists {
+				return nil, fmt.Errorf("duplicate upstream finding id %q", finding.ID)
+			}
+			sources := append([]FindingSource(nil), finding.Sources...)
+			if len(sources) == 0 {
+				sources = []FindingSource{{FindingID: finding.ID, Agent: input.ID, Model: input.Model}}
+			}
+			index[finding.ID] = sources
+		}
+	}
+	return index, nil
+}
+
+func resolveFindingSources(ids []string, index map[string][]FindingSource) ([]FindingSource, error) {
+	seenIDs := make(map[string]bool, len(ids))
+	seenSources := make(map[FindingSource]bool)
+	var sources []FindingSource
+	for _, rawID := range ids {
+		id := strings.TrimSpace(rawID)
+		if id == "" {
+			return nil, errors.New("source_finding_ids cannot contain an empty id")
+		}
+		if seenIDs[id] {
+			return nil, fmt.Errorf("duplicate source finding id %q", id)
+		}
+		seenIDs[id] = true
+		resolved, ok := index[id]
+		if !ok {
+			return nil, fmt.Errorf("unknown source finding id %q", id)
+		}
+		for _, source := range resolved {
+			if !seenSources[source] {
+				seenSources[source] = true
+				sources = append(sources, source)
+			}
+		}
+	}
+	return sources, nil
 }
 
 func validateFinding(finding Finding) error {
@@ -224,12 +352,35 @@ func renderMarkdown(review Review) string {
 			}
 			fmt.Fprintf(&output, "### [%s] %s\n\n", strings.ToUpper(finding.Severity), finding.Summary)
 			fmt.Fprintf(&output, "`%s:%d`\n\n", strings.ReplaceAll(finding.File, "`", "\\`"), finding.Line)
+			if sources := formatFindingSources(finding.Sources); sources != "" {
+				fmt.Fprintf(&output, "**Reported by:** %s\n\n", sources)
+			}
 			output.WriteString(finding.Explanation)
 			output.WriteString("\n")
 		}
 		body = strings.TrimSpace(output.String())
 	}
 	return body + "\n\n---\n\n**Review stats:** " + formatReviewStats(review.Stats)
+}
+
+func formatFindingSources(sources []FindingSource) string {
+	seen := make(map[string]bool, len(sources))
+	parts := make([]string, 0, len(sources))
+	for _, source := range sources {
+		agent := strings.TrimSpace(source.Agent)
+		model := strings.TrimSpace(source.Model)
+		key := agent + "\x00" + model
+		if agent == "" || seen[key] {
+			continue
+		}
+		seen[key] = true
+		label := "`" + strings.ReplaceAll(agent, "`", "\\`") + "`"
+		if model != "" {
+			label += " (`" + strings.ReplaceAll(model, "`", "\\`") + "`)"
+		}
+		parts = append(parts, label)
+	}
+	return strings.Join(parts, ", ")
 }
 
 func formatReviewStats(stats ReviewStats) string {

@@ -32,7 +32,7 @@ func TestRunnerExecutesIndependentAgentsConcurrentlyThenJudge(t *testing.T) {
 		}
 		started <- job.Model
 		<-release
-		return completeReview(job.Model), nil
+		return reviewWithFinding(job.Model), nil
 	}
 	config := Config{
 		Output: "final",
@@ -72,10 +72,54 @@ func TestRunnerExecutesIndependentAgentsConcurrentlyThenJudge(t *testing.T) {
 	if selected, ok := finished.result.Selected(); !ok || selected.Summary != "judged review summary" {
 		t.Fatalf("unexpected selected review: %+v, ok=%t", selected, ok)
 	}
+	if finished.result.SchemaVersion != 2 {
+		t.Fatalf("schema version=%d, want 2", finished.result.SchemaVersion)
+	}
 	mu.Lock()
 	defer mu.Unlock()
 	if len(judgeInputs) != 2 || judgeInputs[0].ID != "security" || judgeInputs[1].ID != "correctness" {
 		t.Fatalf("unexpected judge inputs: %+v", judgeInputs)
+	}
+	for _, input := range judgeInputs {
+		if len(input.Review.Findings) != 1 || input.Review.Findings[0].ID != input.ID+":1" {
+			t.Fatalf("upstream finding was not assigned a stable id: %+v", input)
+		}
+		sources := input.Review.Findings[0].Sources
+		if len(sources) != 1 || sources[0].Agent != input.ID || sources[0].Model != input.Model {
+			t.Fatalf("upstream finding was not attributed: %+v", input)
+		}
+	}
+}
+
+func TestAttributeFindingsPreservesLeafSourcesAcrossJudges(t *testing.T) {
+	root := attributeFindings("security", "security-model", true, reviewWithFinding("security"))
+	if root.Findings[0].ID != "security:1" || len(root.Findings[0].Sources) != 1 {
+		t.Fatalf("root finding was not attributed: %+v", root.Findings[0])
+	}
+	firstJudge := attributeFindings("first-judge", "judge-model", false, review.Review{
+		Findings: []review.Finding{{
+			Severity: "high", Summary: "A concrete defect", Explanation: "This explanation is sufficiently detailed for the review contract.", File: "main.go", Line: 1,
+			Sources: root.Findings[0].Sources,
+		}},
+	})
+	secondJudge := attributeFindings("final", "final-model", false, review.Review{Findings: []review.Finding{{
+		Severity: "high", Summary: "A concrete defect", Explanation: "This explanation is sufficiently detailed for the review contract.", File: "main.go", Line: 1,
+		Sources: firstJudge.Findings[0].Sources,
+	}}})
+	if secondJudge.Findings[0].ID != "final:1" {
+		t.Fatalf("final finding id=%q", secondJudge.Findings[0].ID)
+	}
+	sources := secondJudge.Findings[0].Sources
+	if len(sources) != 1 || sources[0].Agent != "security" || sources[0].Model != "security-model" {
+		t.Fatalf("leaf sources were not preserved: %+v", sources)
+	}
+}
+
+func TestAttributeFindingsCreditsJudgeForNewFinding(t *testing.T) {
+	judgment := attributeFindings("final", "judge-model", false, reviewWithFinding("judge"))
+	sources := judgment.Findings[0].Sources
+	if len(sources) != 1 || sources[0].FindingID != "final:1" || sources[0].Agent != "final" || sources[0].Model != "judge-model" {
+		t.Fatalf("judge-discovered finding was not attributed: %+v", judgment.Findings[0])
 	}
 }
 
@@ -125,4 +169,12 @@ func completeReview(name string) review.Review {
 		Weaknesses: "No material weaknesses were identified.",
 		Findings:   []review.Finding{},
 	}
+}
+
+func reviewWithFinding(name string) review.Review {
+	value := completeReview(name)
+	value.Findings = []review.Finding{{
+		Severity: "high", Summary: "A concrete defect", Explanation: "This explanation is sufficiently detailed for the review contract.", File: "main.go", Line: 1,
+	}}
+	return value
 }
