@@ -102,6 +102,7 @@ func (r Runner) Run(ctx context.Context) (RunResult, error) {
 				coordinator.Lifecycle(configured.ID, "failed: %v", err)
 				return
 			}
+			nodeReview = attributeFindings(configured.ID, configured.Job.Model, len(configured.Inputs) == 0, nodeReview)
 			state.result.Review = &nodeReview
 			if nodeReview.Status == review.ReviewInconclusive {
 				coordinator.Lifecycle(configured.ID, "inconclusive")
@@ -113,7 +114,7 @@ func (r Runner) Run(ctx context.Context) (RunResult, error) {
 	wait.Wait()
 
 	result := RunResult{
-		SchemaVersion: 1,
+		SchemaVersion: 2,
 		Snapshot:      r.Snapshot.Identity(),
 		Output:        r.Config.Output,
 		Nodes:         make([]NodeResult, 0, len(r.Config.Agents)),
@@ -126,6 +127,19 @@ func (r Runner) Run(ctx context.Context) (RunResult, error) {
 		}
 	}
 	return result, result.Err()
+}
+
+func attributeFindings(agentID, model string, independent bool, value review.Review) review.Review {
+	value.Findings = append([]review.Finding(nil), value.Findings...)
+	for index := range value.Findings {
+		finding := &value.Findings[index]
+		finding.ID = fmt.Sprintf("%s:%d", agentID, index+1)
+		finding.Sources = append([]review.FindingSource(nil), finding.Sources...)
+		if independent || len(finding.Sources) == 0 {
+			finding.Sources = []review.FindingSource{{FindingID: finding.ID, Agent: agentID, Model: model}}
+		}
+	}
+	return value
 }
 
 func awaitInputs(ctx context.Context, configured Agent, states map[string]*nodeState) ([]review.NamedReview, string, error) {

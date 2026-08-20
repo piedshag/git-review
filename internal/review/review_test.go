@@ -27,8 +27,25 @@ func TestSubmitReviewToolSchemaRequiresStructuredFindings(t *testing.T) {
 	}
 }
 
+func TestSubmitJudgmentToolRequiresFindingSources(t *testing.T) {
+	tool := submitJudgmentTool()
+	if tool.Function.Name != submitJudgmentToolName {
+		t.Fatalf("unexpected tool name %q", tool.Function.Name)
+	}
+	properties := tool.Function.Parameters["properties"].(map[string]any)
+	findings := properties["findings"].(map[string]any)
+	item := findings["items"].(map[string]any)
+	required := item["required"].([]string)
+	if !contains(required, "source_finding_ids") {
+		t.Fatal("judgment finding schema does not require source_finding_ids")
+	}
+	itemProperties := item["properties"].(map[string]any)
+	if _, ok := itemProperties["source_finding_ids"]; !ok {
+		t.Fatal("judgment finding schema omits source_finding_ids")
+	}
+}
+
 func TestSubmitReviewToolSchemaAvoidsLargeStringMaxLengths(t *testing.T) {
-	tool := submitReviewTool()
 	var inspect func(string, map[string]any)
 	inspect = func(path string, schema map[string]any) {
 		if maximum, ok := schema["maxLength"].(int); ok && maximum >= 2000 {
@@ -43,7 +60,71 @@ func TestSubmitReviewToolSchemaAvoidsLargeStringMaxLengths(t *testing.T) {
 			inspect(path+"[]", items)
 		}
 	}
-	inspect(submitReviewToolName, tool.Function.Parameters)
+	for _, tool := range []Tool{submitReviewTool(), submitJudgmentTool()} {
+		inspect(tool.Function.Name, tool.Function.Parameters)
+	}
+}
+
+func TestParseJudgmentResolvesMultipleFindingSources(t *testing.T) {
+	inputs := []NamedReview{
+		{ID: "security", Model: "security-model", Review: Review{Findings: []Finding{{ID: "security:1", Sources: []FindingSource{{FindingID: "security:1", Agent: "security", Model: "security-model"}}}}}},
+		{ID: "correctness", Model: "correctness-model", Review: Review{Findings: []Finding{{ID: "correctness:2", Sources: []FindingSource{{FindingID: "correctness:2", Agent: "correctness", Model: "correctness-model"}}}}}},
+	}
+	submission, err := parseJudgmentSubmission(reviewArguments(`[
+		{"severity":"high","summary":"Authorization can be bypassed","explanation":"The updated handler skips the required authorization check for delegated requests.","file":"auth.go","line":42,"source_finding_ids":["security:1","correctness:2"]}
+	]`), inputs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sources := submission.Findings[0].Sources
+	if len(sources) != 2 || sources[0].Model != "security-model" || sources[1].Model != "correctness-model" {
+		t.Fatalf("unexpected resolved sources: %+v", sources)
+	}
+}
+
+func TestParseJudgmentPropagatesLeafSourcesThroughJudge(t *testing.T) {
+	inputs := []NamedReview{{
+		ID: "first-judge", Model: "judge-model",
+		Review: Review{Findings: []Finding{{
+			ID: "first-judge:1",
+			Sources: []FindingSource{
+				{FindingID: "security:1", Agent: "security", Model: "security-model"},
+				{FindingID: "correctness:1", Agent: "correctness", Model: "correctness-model"},
+			},
+		}}},
+	}}
+	submission, err := parseJudgmentSubmission(reviewArguments(`[
+		{"severity":"high","summary":"Authorization can be bypassed","explanation":"The updated handler skips the required authorization check for delegated requests.","file":"auth.go","line":42,"source_finding_ids":["first-judge:1"]}
+	]`), inputs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sources := submission.Findings[0].Sources; len(sources) != 2 || sources[0].Agent != "security" || sources[1].Agent != "correctness" {
+		t.Fatalf("leaf provenance was not propagated: %+v", sources)
+	}
+}
+
+func TestJudgmentSourceValidation(t *testing.T) {
+	inputs := []NamedReview{{ID: "security", Model: "model", Review: Review{Findings: []Finding{{ID: "security:1"}}}}}
+	tests := []struct {
+		name    string
+		sources string
+		message string
+	}{
+		{name: "missing", sources: "", message: "source_finding_ids is required"},
+		{name: "null", sources: `,"source_finding_ids":null`, message: "must be an array"},
+		{name: "unknown", sources: `,"source_finding_ids":["missing:1"]`, message: "unknown source"},
+		{name: "duplicate", sources: `,"source_finding_ids":["security:1","security:1"]`, message: "duplicate source"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			finding := `{"severity":"high","summary":"Authorization can be bypassed","explanation":"The updated handler skips the required authorization check for delegated requests.","file":"auth.go","line":42` + test.sources + `}`
+			_, err := parseJudgmentSubmission(reviewArguments("["+finding+"]"), inputs)
+			if err == nil || !strings.Contains(err.Error(), test.message) {
+				t.Fatalf("error=%v, want substring %q", err, test.message)
+			}
+		})
+	}
 }
 
 func TestParseAndRenderReview(t *testing.T) {
@@ -107,6 +188,7 @@ func TestReviewSubmissionValidation(t *testing.T) {
 		{name: "unsafe file", arguments: reviewArguments(`[{"severity":"high","summary":"Unsafe file path","explanation":"This explanation is sufficiently detailed for validation.","file":"../main.go","line":1}]`), errorText: "repository-relative"},
 		{name: "invalid line", arguments: reviewArguments(`[{"severity":"high","summary":"Invalid line number","explanation":"This explanation is sufficiently detailed for validation.","file":"main.go","line":0}]`), errorText: "line"},
 		{name: "unknown field", arguments: reviewArguments(`[{"severity":"high","summary":"Unknown extra field","explanation":"This explanation is sufficiently detailed for validation.","file":"main.go","line":1,"confidence":1}]`), errorText: "unknown field"},
+		{name: "judgment sources", arguments: reviewArguments(`[{"severity":"high","summary":"Unexpected finding sources","explanation":"This explanation is sufficiently detailed for validation.","file":"main.go","line":1,"source_finding_ids":[]}]`), errorText: "only allowed in judgments"},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {

@@ -3,6 +3,7 @@ package review
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 )
@@ -37,5 +38,17 @@ func TestReviewLimitsDoNotSwallowOrdinaryErrors(t *testing.T) {
 	decision := limits.HandleError(t.Context(), 1, errors.New("connection reset"))
 	if decision.action != limitUnhandled {
 		t.Fatalf("ordinary error was handled as a limit: %+v", decision)
+	}
+}
+
+func TestReviewLimitsRequireJudgmentToolForJudge(t *testing.T) {
+	limits := newReviewLimits(t.Context(), time.Now(), 1, submitJudgmentToolName)
+	notice := limits.turnNotice(1)
+	if notice == nil || !strings.Contains(notice.feedback, submitJudgmentToolName) || strings.Contains(notice.feedback, submitReviewToolName) {
+		t.Fatalf("unexpected final judgment notice: %+v", notice)
+	}
+	decision := limits.HandleError(t.Context(), 0, errOutputLimit)
+	if !strings.Contains(decision.feedback, submitJudgmentToolName) {
+		t.Fatalf("unexpected judgment recovery feedback: %+v", decision)
 	}
 }

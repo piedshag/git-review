@@ -38,10 +38,15 @@ type reviewLimits struct {
 	timeoutRecoveryUsed  bool
 	responseRecoveryUsed bool
 	focusedRecoveryNext  bool
+	submitTool           string
 }
 
-func newReviewLimits(ctx context.Context, started time.Time, maxTurns int) *reviewLimits {
-	limits := &reviewLimits{maxTurns: maxTurns}
+func newReviewLimits(ctx context.Context, started time.Time, maxTurns int, tools ...string) *reviewLimits {
+	submitTool := submitReviewToolName
+	if len(tools) > 0 && tools[0] != "" {
+		submitTool = tools[0]
+	}
+	limits := &reviewLimits{maxTurns: maxTurns, submitTool: submitTool}
 	deadline, ok := ctx.Deadline()
 	if !ok {
 		return limits
@@ -82,8 +87,8 @@ func (l *reviewLimits) turnNotice(step int) *limitNotice {
 		}
 	case 1:
 		return &limitNotice{
-			activity: "final model turn; requiring submit_review",
-			feedback: "This is the final allowed model turn. Call submit_review exactly once and by itself now. Do not call inspection tools or return free-form text.",
+			activity: "final model turn; requiring " + l.submitTool,
+			feedback: "This is the final allowed model turn. Call " + l.submitTool + " exactly once and by itself now. Do not call inspection tools or return free-form text.",
 		}
 	default:
 		return nil
@@ -97,10 +102,10 @@ func (l *reviewLimits) HandleError(parent context.Context, step int, err error) 
 		return limitDecision{
 			action:   limitRetry,
 			activity: "review deadline approaching; reserving remaining time for submission",
-			feedback: "The review deadline is approaching and the previous turn was stopped to preserve time. Use the remaining time to call submit_review exactly once and by itself now. Be concise and do not perform more inspection.",
+			feedback: "The review deadline is approaching and the previous turn was stopped to preserve time. Use the remaining time to call " + l.submitTool + " exactly once and by itself now. Be concise and do not perform more inspection.",
 		}
 	}
-	if feedback, activity, limited := responseLimitFeedback(err); limited {
+	if feedback, activity, limited := responseLimitFeedback(err, l.submitTool); limited {
 		if !l.responseRecoveryUsed && step < l.maxTurns {
 			l.responseRecoveryUsed = true
 			l.focusedRecoveryNext = true
@@ -137,13 +142,17 @@ func (l *reviewLimits) Exhausted() limitDecision {
 	}
 }
 
-func responseLimitFeedback(err error) (feedback, activity string, limited bool) {
+func responseLimitFeedback(err error, tools ...string) (feedback, activity string, limited bool) {
+	submitTool := submitReviewToolName
+	if len(tools) > 0 && tools[0] != "" {
+		submitTool = tools[0]
+	}
 	switch {
 	case errors.Is(err, errOutputLimit):
-		return "The provider truncated your previous response at its output limit. Call submit_review exactly once and by itself now. Be concise, do not perform more inspection, and include the required summary, strengths, weaknesses, and findings.",
+		return "The provider truncated your previous response at its output limit. Call " + submitTool + " exactly once and by itself now. Be concise, do not perform more inspection, and include the required summary, strengths, weaknesses, and findings.",
 			"provider output limit reached; requesting concise submission", true
 	case errors.Is(err, errResponseLimit):
-		return "Your previous streamed response approached the configured response-size limit. Call submit_review exactly once and by itself now. Be concise, do not perform more inspection, and do not include lengthy reasoning.",
+		return "Your previous streamed response approached the configured response-size limit. Call " + submitTool + " exactly once and by itself now. Be concise, do not perform more inspection, and do not include lengthy reasoning.",
 			"response-size limit reached; requesting concise submission", true
 	default:
 		return "", "", false
