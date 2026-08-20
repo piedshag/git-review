@@ -11,6 +11,7 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"sync"
 
 	"github.com/piedshag/git-review/internal/agent"
 
@@ -34,6 +35,7 @@ type Snapshot struct {
 	target     *object.Commit
 	baseName   string
 	targetName string
+	callMu     sync.Mutex
 }
 
 type Identity struct {
@@ -128,6 +130,12 @@ func (s *Snapshot) Tools() []agent.Tool {
 }
 
 func (s *Snapshot) Call(name, rawArguments string) string {
+	// go-git's filesystem object storage lazily populates shared pack-index
+	// caches during reads. Serialize snapshot tool calls so concurrent review
+	// agents cannot race inside those otherwise read-only operations.
+	s.callMu.Lock()
+	defer s.callMu.Unlock()
+
 	var args struct {
 		Pattern string `json:"pattern"`
 		Glob    string `json:"glob"`
